@@ -1,0 +1,16 @@
+import type { ActionRequest } from "@mc-ai-video/contracts";
+
+import type { AgentSchedulerState } from "./types";
+
+export interface RunningAction {
+  request: ActionRequest;
+  controller: AbortController;
+  promise: Promise<void>;
+}
+
+export interface RuntimeState {
+  publicState: AgentSchedulerState;
+  action?: RunningAction;
+  planningController?: AbortController;
+  planningPromise?: Promise<void>;
+}

@@ -1,0 +1,23 @@
+{
+  "id": "guard-3",
+  "name": "Kira",
+  "account": {
+    "username": "KiraBot",
+    "auth": "offline"
+  },
+  "role": "guard",
+  "team": "ai",
+  "mode": "routine",
+  "routine": "guard",
+  "allowedActions": [
+    "idle",
+    "chat_public",
+    "chat_ai_private",
+    "move_to",
+    "follow_player",
+    "flee",
+    "attack_entity"
+  ],
+  "providerRef": "local-planner",
+  "visibility": "ai"
+}

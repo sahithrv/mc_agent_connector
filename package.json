@@ -1,0 +1,20 @@
+{
+  "name": "mc-ai-video-code",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "tsc -b && npm --workspace @mc-ai-video/studio-web run build",
+    "lint": "tsc -b --pretty false",
+    "test": "npm run build && node apps/studio-api/dist/test-runner.js && npm --workspace @mc-ai-video/studio-web run test:run",
+    "start:api": "npm --workspace @mc-ai-video/studio-api start",
+    "start:web": "npm --workspace @mc-ai-video/studio-web run dev"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}

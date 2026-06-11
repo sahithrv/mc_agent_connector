@@ -1,0 +1,9 @@
+backend:
+  base-url: "http://127.0.0.1:3000"
+  event-path: "/plugin/events"
+  shared-secret: "dev-local-secret"
+  timeout-ms: 1500
+  server-id: "local-paper"
+
+forwarding:
+  enabled: true

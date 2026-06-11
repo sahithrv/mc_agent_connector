@@ -1,0 +1,24 @@
+name: McAiStudioBridge
+version: ${version}
+main: com.mcaivideo.studio.paper.StudioBridgePlugin
+api-version: "1.21"
+description: Optional local Paper bridge for Minecraft AI Agent Studio.
+commands:
+  aichat:
+    description: Send a private AI-channel message to the local Studio backend.
+    usage: /aichat <message>
+    permission: mcas.aichat
+  teamchat:
+    description: Send a private human team message to the local Studio backend.
+    usage: /teamchat <message>
+    permission: mcas.teamchat
+permissions:
+  mcas.aichat:
+    description: Allows sending private AI chat to the Studio backend only.
+    default: true
+  mcas.teamchat:
+    description: Allows sending private human team chat to the Studio backend only.
+    default: true
+  mcas.recorder:
+    description: Marks a player as a recorder-visible observer in forwarded metadata.
+    default: op

@@ -1,0 +1,97 @@
+import type { ActionRequest, ActionResult, AgentConfig } from "@mc-ai-video/contracts";
+
+import type { RoutineActionIntent } from "../routines";
+import type { RuntimeState } from "./runtime";
+import type { ActionRegistry, SchedulerEvent } from "./types";
+
+interface ActionRunnerDependencies {
+  actions: ActionRegistry;
+  now: () => number;
+  idFactory: () => string;
+  emit(event: SchedulerEvent): void;
+}
+
+export class ActionSlotRunner {
+  public constructor(private readonly deps: ActionRunnerDependencies) {}
+
+  public activeCount(states: Iterable<RuntimeState>): number {
+    return [...states].filter((state) => state.action).length;
+  }
+
+  public start(agent: AgentConfig, state: RuntimeState, intent: RoutineActionIntent): void {
+    const request = this.toActionRequest(agent, intent);
+    if (!this.deps.actions.canRun(agent, request)) {
+      this.deps.emit({
+        type: "scheduler.action.rejected",
+        agentId: agent.id,
+        severity: 3,
+        payload: { action: request.action },
+      });
+      return;
+    }
+
+    const controller = new AbortController();
+    state.publicState.mode = "acting";
+    state.publicState.currentActionId = request.id;
+    this.deps.emit({
+      type: "scheduler.action.started",
+      agentId: agent.id,
+      severity: 1,
+      payload: { action: request.action, requestId: request.id },
+    });
+
+    const promise = this.deps.actions
+      .run(agent, request, controller.signal)
+      .then((result) => this.finish(agent, state, result))
+      .catch((error: unknown) => {
+        this.finish(agent, state, {
+          requestId: request.id,
+          agentId: agent.id,
+          action: request.action,
+          ok: false,
+          startedAt: request.createdAt,
+          completedAt: new Date(this.deps.now()).toISOString(),
+          error: error instanceof Error ? error.message : "action failed",
+        });
+      });
+
+    state.action = { request, controller, promise };
+  }
+
+  public cancel(agentId: string, state: RuntimeState, reason: string): void {
+    // Cancellation is cooperative; long registry actions must honor the abort signal.
+    if (!state.action) return;
+    state.action.controller.abort(reason);
+    this.deps.emit({
+      type: "scheduler.action.canceled",
+      agentId,
+      severity: 3,
+      payload: { action: state.action.request.action, reason },
+    });
+  }
+
+  private finish(agent: AgentConfig, state: RuntimeState, result: ActionResult): void {
+    if (state.action?.request.id !== result.requestId) return;
+    state.action = undefined;
+    state.publicState.currentActionId = undefined;
+    if (state.publicState.mode === "acting") state.publicState.mode = agent.mode ?? "routine";
+    this.deps.emit({
+      type: "scheduler.action.finished",
+      agentId: agent.id,
+      severity: result.ok ? 1 : 3,
+      payload: { action: result.action, requestId: result.requestId, ok: result.ok },
+    });
+  }
+
+  private toActionRequest(agent: AgentConfig, intent: RoutineActionIntent): ActionRequest {
+    return {
+      id: this.deps.idFactory(),
+      agentId: agent.id,
+      action: intent.action,
+      params: intent.params,
+      requestedBy: intent.requestedBy ?? "scheduler",
+      timeoutMs: intent.timeoutMs,
+      createdAt: new Date(this.deps.now()).toISOString(),
+    };
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "./packages/contracts"
+    },
+    {
+      "path": "./apps/studio-api"
+    },
+    {
+      "path": "./apps/studio-web"
+    }
+  ]
+}

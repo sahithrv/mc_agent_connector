@@ -1,0 +1,23 @@
+{
+  "id": "miner-3",
+  "name": "Cato",
+  "account": {
+    "username": "CatoBot",
+    "auth": "offline"
+  },
+  "role": "miner",
+  "team": "ai",
+  "mode": "routine",
+  "routine": "miner",
+  "allowedActions": [
+    "idle",
+    "chat_public",
+    "chat_ai_private",
+    "move_to",
+    "flee",
+    "collect_item",
+    "mine_block"
+  ],
+  "providerRef": "local-planner",
+  "visibility": "ai"
+}
