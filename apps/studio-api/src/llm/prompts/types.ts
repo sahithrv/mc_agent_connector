@@ -62,7 +62,7 @@ export interface PromptPerceptionSnapshot
 }
 
 export interface PromptContextInput {
-  agent: Pick<AgentConfig, "id" | "name" | "role" | "team" | "routine" | "allowedActions">;
+  agent: Pick<AgentConfig, "id" | "name" | "role" | "team" | "subteam" | "leader" | "routine" | "allowedActions">;
   staticPersona: StaticPersona;
   dynamicState?: DynamicAgentState;
   perception?: PromptPerceptionSnapshot;

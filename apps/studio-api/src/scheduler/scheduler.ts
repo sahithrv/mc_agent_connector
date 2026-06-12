@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { AgentConfig, GameEvent } from "@mc-ai-video/contracts";
 
 import type { ReflectionService } from "../memory/reflection";
+import type { RoutineActionIntent } from "../routines";
 import { ActionSlotRunner } from "./action-runner";
 import { cancellationTargetsForEvent, routeWakeEvent } from "./events";
 import type { RuntimeState } from "./runtime";
@@ -20,6 +21,7 @@ export class AgentScheduler {
   private readonly now: () => number;
   private readonly idFactory: () => string;
   private reflection?: ReflectionService;
+  private pendingActionCursor = 0;
 
   public constructor(private readonly deps: SchedulerDependencies) {
     this.agents = [...deps.agents].sort((left, right) => left.id.localeCompare(right.id));
@@ -47,6 +49,29 @@ export class AgentScheduler {
 
   public setReflectionService(reflection: ReflectionService): void {
     this.reflection = reflection;
+  }
+
+  public addAgent(agent: AgentConfig): boolean {
+    if (this.states.has(agent.id)) {
+      return false;
+    }
+    this.agents.push(agent);
+    this.agents.sort((left, right) => left.id.localeCompare(right.id));
+    this.states.set(agent.id, {
+      publicState: {
+        agentId: agent.id,
+        mode: agent.mode ?? "routine",
+        planningQueued: false,
+        planning: false,
+        nextPlanAt: 0,
+      },
+    });
+    this.queuePlanning(agent.id, { type: "manual" });
+    return true;
+  }
+
+  public agentIds(): string[] {
+    return this.agents.map((agent) => agent.id);
   }
 
   public queuePlanning(agentId: string, reason: WakeReason = { type: "manual" }): void {
@@ -89,6 +114,8 @@ export class AgentScheduler {
   public async tick(): Promise<void> {
     const now = this.now();
 
+    this.startPendingActions();
+
     // Priority stays deterministic: queued planners fill limited slots by agent id order.
     for (const agent of this.agents) {
       if (this.activePlanningCount() >= this.deps.config.maxPlanningSlots) break;
@@ -113,8 +140,8 @@ export class AgentScheduler {
       const result = routine.run(agent, perception);
       result.taskEvents.forEach((event) => this.emit(event));
       if (result.wantsPlanning) this.queuePlanning(agent.id, { type: "manual" });
-      if (result.action && this.activeActionCount() < this.deps.config.maxConcurrentActions) {
-        this.actionRunner.start(agent, state, result.action);
+      if (result.action) {
+        this.startOrQueueAction(agent, state, result.action);
       }
     }
   }
@@ -163,6 +190,42 @@ export class AgentScheduler {
     await Promise.allSettled(pending);
   }
 
+  private startPendingActions(): void {
+    if (this.agents.length === 0) {
+      return;
+    }
+
+    const startIndex = this.pendingActionCursor % this.agents.length;
+    for (let offset = 0; offset < this.agents.length; offset += 1) {
+      if (this.activeActionCount() >= this.deps.config.maxConcurrentActions) break;
+      const index = (startIndex + offset) % this.agents.length;
+      const agent = this.agents[index];
+      if (!agent) continue;
+      const state = this.states.get(agent.id);
+      if (!state?.pendingAction || state.action || state.publicState.mode === "paused" || state.publicState.mode === "failed") {
+        continue;
+      }
+      const intent = state.pendingAction;
+      state.pendingAction = undefined;
+      this.actionRunner.start(agent, state, intent);
+      this.pendingActionCursor = (index + 1) % this.agents.length;
+    }
+  }
+
+  private startOrQueueAction(agent: AgentConfig, state: RuntimeState, intent: RoutineActionIntent): void {
+    if (this.activeActionCount() < this.deps.config.maxConcurrentActions) {
+      this.actionRunner.start(agent, state, intent);
+      return;
+    }
+    state.pendingAction = intent;
+    this.emit({
+      type: "scheduler.action.queued",
+      agentId: agent.id,
+      severity: 1,
+      payload: { action: intent.action },
+    });
+  }
+
   private startPlanning(agent: AgentConfig, state: RuntimeState): void {
     const reason = state.publicState.wakeReason ?? { type: "manual" as const };
     const controller = new AbortController();
@@ -183,8 +246,8 @@ export class AgentScheduler {
       try {
         const perception = await this.deps.perception.snapshot(agent);
         const decision = await this.deps.planner.plan(agent, perception, reason, controller.signal);
-        if (decision.action && this.activeActionCount() < this.deps.config.maxConcurrentActions) {
-          this.actionRunner.start(agent, state, decision.action);
+        if (decision.action) {
+          this.startOrQueueAction(agent, state, decision.action);
         }
       } catch (error) {
         planningError = error instanceof Error ? error.message : "planning failed";
@@ -210,6 +273,7 @@ export class AgentScheduler {
     if (!state) return;
 
     this.actionRunner.cancel(agentId, state, reason);
+    state.pendingAction = undefined;
     state.planningController?.abort(reason);
     state.publicState.planningQueued = false;
   }
@@ -219,7 +283,8 @@ export class AgentScheduler {
       state.publicState.mode === "routine" &&
       !state.publicState.planning &&
       !state.publicState.planningQueued &&
-      !state.action
+      !state.action &&
+      !state.pendingAction
     );
   }
 

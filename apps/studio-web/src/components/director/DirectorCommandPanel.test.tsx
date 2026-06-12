@@ -23,6 +23,7 @@ describe("DirectorCommandPanel", () => {
 
     renderPanel({ api: mockApi(request) });
 
+    await user.click(screen.getByRole("tab", { name: "Event" }));
     await user.type(screen.getByLabelText(/event type/i), "leader.attack");
     fireEvent.change(screen.getByLabelText(/payload json/i), { target: { value: "{bad" } });
     await user.click(screen.getByRole("button", { name: "Inject event" }));
@@ -47,7 +48,7 @@ describe("DirectorCommandPanel", () => {
 
     renderPanel({ api: mockApi(request) });
 
-    await user.click(screen.getByRole("tab", { name: "Announcement" }));
+    await user.click(screen.getByRole("tab", { name: "Chat" }));
     await user.type(screen.getByLabelText(/recipients/i), "leader, scout-2");
     await user.type(screen.getByLabelText(/content/i), "Move now");
     await user.click(screen.getByRole("button", { name: "Send announcement" }));
@@ -70,15 +71,49 @@ describe("DirectorCommandPanel", () => {
     });
   });
 
-  it("clearly reports missing backend support for role assignment", async () => {
+  it("injects role changes through the director injection endpoint", async () => {
     const user = userEvent.setup();
+    const request = vi.fn(async (path: string, init?: RequestInit) => ({
+      ok: true,
+      command: {
+        id: "cmd-1",
+        type: "set-agent-role",
+        targetAgentId: "agent-1",
+        payload: JSON.parse(String(init?.body)),
+        timestamp: "2026-06-10T00:10:00.000Z",
+      },
+    }));
 
-    renderPanel({});
+    renderPanel({
+      api: mockApi(request),
+      agents: [
+        {
+          id: "agent-1",
+          name: "Agent One",
+          account: { username: "AgentOne" },
+          role: "Miner",
+          team: "ai",
+          subteam: "oak",
+          allowedActions: ["idle"],
+          providerRef: "deepseek",
+          mode: "routine",
+        },
+      ],
+    });
 
-    await user.click(screen.getByRole("tab", { name: "Role" }));
+    await user.click(selectInput("Injection"));
+    await user.click(screen.getByRole("option", { name: "Role change" }));
+    await user.click(selectInput("Agent"));
+    await user.click(screen.getByRole("option", { name: "Agent One / agent-1" }));
+    await user.click(selectInput("Role"));
+    await user.click(screen.getByRole("option", { name: "Spy" }));
+    await user.click(screen.getByRole("button", { name: "Inject" }));
 
-    expect(screen.getByText("The V1 director API does not expose role assignment yet.")).toBeInTheDocument();
-    expect(screen.getByText("role API missing")).toBeInTheDocument();
+    expect(await screen.findByText("Injected set-agent-role.")).toBeInTheDocument();
+    expect(request).toHaveBeenCalledWith(
+      "/director/injections",
+      expect.objectContaining({ method: "POST" }),
+    );
   });
 });
 
@@ -88,6 +123,15 @@ function renderPanel(props: Partial<DirectorCommandPanelProps>): void {
       <DirectorCommandPanel agents={[]} {...props} />
     </MantineProvider>,
   );
+}
+
+function selectInput(label: string): HTMLElement {
+  const input = screen.getAllByLabelText(label)
+    .find((element) => element.tagName === "INPUT");
+  if (!input) {
+    throw new Error(`${label} select input was not found`);
+  }
+  return input;
 }
 
 function mockApi(request: Mock): NonNullable<DirectorCommandPanelProps["api"]> {

@@ -11,9 +11,7 @@ export class GuardRoutine implements Routine {
   public readonly id = "guard";
 
   public run(agent: RoutineAgent, perception: PerceptionSnapshot): RoutineRunResult {
-    const threateningPlayer = perception.nearbyPlayers.find(
-      (player) => player.threatening || player.protected,
-    );
+    const threateningPlayer = perception.nearbyPlayers.find((player) => player.threatening);
     if (threateningPlayer) {
       return this.warn(agent, threateningPlayer.id);
     }

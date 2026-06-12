@@ -84,14 +84,25 @@ export class ActionSlotRunner {
   }
 
   private toActionRequest(agent: AgentConfig, intent: RoutineActionIntent): ActionRequest {
+    const timeoutMs = intent.timeoutMs === undefined
+      ? undefined
+      : Math.max(intent.timeoutMs, minimumTimeoutForIntent(intent));
     return {
       id: this.deps.idFactory(),
       agentId: agent.id,
       action: intent.action,
       params: intent.params,
       requestedBy: intent.requestedBy ?? "scheduler",
-      timeoutMs: intent.timeoutMs,
+      timeoutMs,
       createdAt: new Date(this.deps.now()).toISOString(),
     };
   }
+}
+
+function minimumTimeoutForIntent(intent: RoutineActionIntent): number {
+  const duration = intent.params.durationMs;
+  if (typeof duration === "number" && Number.isFinite(duration)) {
+    return duration + 1_000;
+  }
+  return intent.action === "idle" ? 2_000 : 1_000;
 }

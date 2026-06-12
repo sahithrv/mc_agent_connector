@@ -11,6 +11,7 @@ npm install
 npm run build
 npm test
 npm run start:api
+npm run live:agents
 cd packages/minecraft-plugin
 gradle build
 mkdir ..\..\.local\paper-server\plugins
@@ -31,3 +32,21 @@ Keep `plugins/McAiStudioBridge/config.yml` `backend.shared-secret` aligned with 
 3. Three bots: verify `/aichat hello` and `/teamchat hello` do not appear in public chat.
 4. Twenty bots: connect in batches, watch backend and Paper logs for rejected or timed-out forwards.
 5. Dashboard later: start the dashboard separately, then verify public chat, private chat, recorder events, and director controls in separate panels.
+
+For live agent planning, stop any separate `start:api` and `connect-agents` processes, then run `npm run live:agents` from the repo root. This starts the Studio backend, connects the configured bots, and wakes agent planning when Paper forwards `/aichat` or public chat events. Use `/aichat <task>` in Minecraft to give the roster a task.
+
+## Live Subteams
+
+Agent configs support `subteam` and `leader`. The sample roster is split into four AI subteams: `oak`, `iron`, `river`, and `ember`, each with one leader. In live planning:
+
+- `chat_ai_private` with no explicit recipients goes only to the sender's subteam.
+- `chat_ai_private` with `subteamId` sends to another subteam.
+- `chat_ai_private` with `leadersOnly: true` sends to other subteam leaders.
+- `/aichat <task>` updates the current goal for every subteam and wakes planning.
+- Prompts include the full subteam roster, the agent's own leader, and the active subteam goal.
+
+Example:
+
+```text
+/aichat Each subteam follows its leader, builds a small base, and coordinates only with its own team unless it needs help from another leader.
+```

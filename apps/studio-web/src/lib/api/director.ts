@@ -1,4 +1,5 @@
 import type {
+  AgentConfig,
   AiChatMessage,
   EventSeverity,
   GameEvent,
@@ -58,6 +59,42 @@ export interface RoleAssignmentInput {
   requestedBy?: string;
 }
 
+export type DirectorInjectionKind =
+  | "personality"
+  | "role"
+  | "task"
+  | "team-task"
+  | "god-dialogue"
+  | "memory"
+  | "trait"
+  | "instruction";
+
+export type DirectorInjectionScope = "agent" | "subteam" | "all";
+
+export interface DirectorInjectionInput {
+  kind: DirectorInjectionKind;
+  scope: DirectorInjectionScope;
+  agentId?: string;
+  subteamId?: string;
+  text: string;
+  taskId?: string;
+  secret?: boolean;
+  requestedBy?: string;
+  reason?: string;
+}
+
+export interface AddAgentInput {
+  id: string;
+  name: string;
+  username: string;
+  role: string;
+  team?: string;
+  subteam?: string;
+  leader?: boolean;
+  routine?: string;
+  providerRef?: string;
+}
+
 type ApiRequest = Pick<ApiClient, "request">;
 
 interface DirectorEventResponse {
@@ -83,6 +120,15 @@ interface DirectorClipResponse {
   ok: boolean;
   marker?: BackendClipMarker;
   command: PendingDirectorCommand;
+}
+
+interface DirectorCommandResponse {
+  ok: boolean;
+  command: PendingDirectorCommand;
+}
+
+interface AddAgentResponse extends DirectorCommandResponse {
+  agent: AgentConfig;
 }
 
 export async function injectDirectorEvent(
@@ -137,11 +183,56 @@ export async function markDirectorClip(
   };
 }
 
-export function unsupportedRoleAssignment(input: RoleAssignmentInput): Error {
-  const secretLabel = input.secret ? "secret role" : "role";
-  return new Error(
-    `Cannot assign ${secretLabel} "${input.role}" to ${input.agentId}: the V1 director API has no role assignment endpoint.`,
+export async function injectDirectorCommand(
+  input: DirectorInjectionInput,
+  api: ApiRequest = client,
+): Promise<PendingDirectorCommand> {
+  const response = await api.request<DirectorCommandResponse>("/director/injections", {
+    method: "POST",
+    body: JSON.stringify({
+      ...input,
+      requestedBy: input.requestedBy ?? "director",
+    }),
+  });
+  return response.command;
+}
+
+export async function assignDirectorRole(
+  input: RoleAssignmentInput,
+  api: ApiRequest = client,
+): Promise<PendingDirectorCommand> {
+  return injectDirectorCommand(
+    {
+      kind: "role",
+      scope: "agent",
+      agentId: input.agentId,
+      text: input.role,
+      secret: input.secret,
+      requestedBy: input.requestedBy,
+    },
+    api,
   );
+}
+
+export async function addDirectorAgent(
+  input: AddAgentInput,
+  api: ApiRequest = client,
+): Promise<AgentConfig> {
+  const response = await api.request<AddAgentResponse>("/director/agents", {
+    method: "POST",
+    body: JSON.stringify({
+      id: input.id,
+      name: input.name,
+      account: { username: input.username, auth: "offline" },
+      role: input.role,
+      team: input.team,
+      subteam: input.subteam,
+      leader: input.leader,
+      routine: input.routine,
+      providerRef: input.providerRef ?? "deepseek",
+    }),
+  });
+  return response.agent;
 }
 
 function stringPayloadValue(value: JsonValue | undefined): string | undefined {

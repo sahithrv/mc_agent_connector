@@ -19,7 +19,12 @@ export interface OpenAiCompatibleChatRequest {
 
 export interface OpenAiCompatibleChatResponse {
   choices?: Array<{ message?: { content?: string } }>;
-  usage?: { prompt_tokens?: number; completion_tokens?: number };
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    prompt_cache_hit_tokens?: number;
+    prompt_cache_miss_tokens?: number;
+  };
 }
 
 export interface OpenAiCompatibleChatClient {
@@ -60,6 +65,8 @@ export class OpenAiCompatibleProvider implements LlmProvider {
       return validateStructuredOutput(request.schemaName, schema, parseJsonObject(content), {
         inputTokens: response.usage?.prompt_tokens,
         outputTokens: response.usage?.completion_tokens,
+        cacheHitInputTokens: response.usage?.prompt_cache_hit_tokens,
+        cacheMissInputTokens: response.usage?.prompt_cache_miss_tokens,
       });
     } catch (error) {
       return llmError("provider_request_failed", formatProviderError(error), isRetryableError(error));

@@ -60,7 +60,7 @@ function toEntitySnapshot(
   return {
     id: String(entity.id ?? ""),
     kind: classifyEntity(entity),
-    name: entity.name ?? entity.mobType ?? entity.displayName,
+    name: entity.displayName ?? entity.name ?? entity.type,
     username: entity.username,
     position,
     distance: origin && position ? distance(origin, position) : undefined,
@@ -78,7 +78,7 @@ function classifyEntity(entity: BotEntity): EntityKind {
     return "item";
   }
   if (entity.type === "mob") {
-    return isHostileName(entity.name ?? entity.mobType) ? "hostile" : "passive";
+    return isHostileName(entity.displayName ?? entity.name) ? "hostile" : "passive";
   }
   return "unknown";
 }
@@ -93,7 +93,11 @@ function isHostileName(name?: string): boolean {
     "spider",
     "witch",
     "zombie",
-  ].includes((name ?? "").toLowerCase());
+  ].includes(normalizedEntityName(name));
+}
+
+function normalizedEntityName(name?: string): string {
+  return (name ?? "").toLowerCase().replace(/\s+/g, "_");
 }
 
 function takeKind(entities: EntitySnapshot[], kind: EntityKind): EntitySnapshot[] {

@@ -52,7 +52,7 @@ export function createAttackEntityAction(): RegisteredAction {
       await Promise.resolve(context.bot?.attack?.(target));
       return actionSucceeded(context.request, context.startedAt, {
         entityId: String(target.id),
-        target: target.username ?? target.name ?? target.mobType ?? "entity",
+        target: target.username ?? target.displayName ?? target.name ?? target.type ?? "entity",
       });
     },
   };
@@ -126,5 +126,5 @@ function isPlayer(entity: BotEntity): boolean {
 }
 
 function targetName(entity: BotEntity): string {
-  return (entity.name ?? entity.mobType ?? entity.displayName ?? "").toLowerCase();
+  return (entity.name ?? entity.displayName ?? entity.type ?? "").toLowerCase().replace(/\s+/g, "_");
 }

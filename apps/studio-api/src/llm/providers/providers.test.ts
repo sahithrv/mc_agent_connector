@@ -61,7 +61,12 @@ test("OpenAI adapter maps structured chat completion request", async () => {
       assert.equal(options.apiKey, "openai-key");
       return {
         choices: [{ message: { content: JSON.stringify(decisionOutput()) } }],
-        usage: { prompt_tokens: 10, completion_tokens: 4 },
+        usage: {
+          prompt_tokens: 10,
+          completion_tokens: 4,
+          prompt_cache_hit_tokens: 6,
+          prompt_cache_miss_tokens: 4,
+        },
       };
     },
   };
@@ -75,7 +80,14 @@ test("OpenAI adapter maps structured chat completion request", async () => {
   assert.equal(captures[0]?.model, "gpt-test");
   assert.deepEqual(captures[0]?.messages.map((message) => message.role), ["system", "user"]);
   assert.deepEqual(captures[0]?.response_format, { type: "json_object" });
-  if (result.ok) assert.deepEqual(result.usage, { inputTokens: 10, outputTokens: 4 });
+  if (result.ok) {
+    assert.deepEqual(result.usage, {
+      inputTokens: 10,
+      outputTokens: 4,
+      cacheHitInputTokens: 6,
+      cacheMissInputTokens: 4,
+    });
+  }
 });
 
 test("Anthropic adapter maps messages request", async () => {
@@ -110,7 +122,10 @@ test("DeepSeek adapter uses OpenAI-compatible mapping and configurable base URL"
     async createChatCompletion(body, options) {
       captured = body;
       assert.equal(options.baseUrl, "https://deepseek.test");
-      return { choices: [{ message: { content: JSON.stringify(decisionOutput()) } }] };
+      return {
+        choices: [{ message: { content: JSON.stringify(decisionOutput()) } }],
+        usage: { prompt_cache_hit_tokens: 8, prompt_cache_miss_tokens: 2 },
+      };
     },
   };
 
@@ -123,6 +138,7 @@ test("DeepSeek adapter uses OpenAI-compatible mapping and configurable base URL"
   assert.equal(result.ok, true);
   assert.equal(captured?.model, "deepseek-chat");
   assert.equal(captured?.messages[0]?.role, "system");
+  if (result.ok) assert.equal(result.usage?.cacheHitInputTokens, 8);
 });
 
 function request(provider = "missing"): LlmRequest {

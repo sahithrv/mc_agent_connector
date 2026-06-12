@@ -3,16 +3,17 @@ import { LockKeyhole, ShieldAlert } from "lucide-react";
 import { useState } from "react";
 
 import type { RoleAssignmentInput } from "../../lib/api/director";
-import { unsupportedRoleAssignment } from "../../lib/api/director";
+import { assignDirectorRole } from "../../lib/api/director";
 import type { UiAgentRuntime } from "../../lib/types";
 import "./director.css";
 
 export interface AssignRoleFormProps {
   agents: readonly UiAgentRuntime[];
+  api?: Parameters<typeof assignDirectorRole>[1];
   onAssignRole?: (assignment: RoleAssignmentInput) => Promise<void> | void;
 }
 
-export function AssignRoleForm({ agents, onAssignRole }: AssignRoleFormProps): JSX.Element {
+export function AssignRoleForm({ agents, api, onAssignRole }: AssignRoleFormProps): JSX.Element {
   const [agentId, setAgentId] = useState("");
   const [role, setRole] = useState("");
   const [secret, setSecret] = useState(true);
@@ -33,14 +34,13 @@ export function AssignRoleForm({ agents, onAssignRole }: AssignRoleFormProps): J
       requestedBy: "director",
     };
 
-    if (!onAssignRole) {
-      setError(unsupportedRoleAssignment(assignment).message);
-      return;
-    }
-
     setLoading(true);
     try {
-      await onAssignRole(assignment);
+      if (onAssignRole) {
+        await onAssignRole(assignment);
+      } else {
+        await assignDirectorRole(assignment, api);
+      }
       setStatus(`${secret ? "Secret role" : "Role"} assigned to ${agentId}.`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Role assignment failed.");
@@ -51,10 +51,8 @@ export function AssignRoleForm({ agents, onAssignRole }: AssignRoleFormProps): J
 
   return (
     <form className="director-form" onSubmit={(event) => void submit(event)}>
-      <Alert color={onAssignRole ? "green" : "yellow"} icon={<ShieldAlert size={15} />}>
-        {onAssignRole
-          ? "Role assignments will update the active studio roster."
-          : "The V1 director API does not expose role assignment yet."}
+      <Alert color="green" icon={<ShieldAlert size={15} />}>
+        Role assignments are injected into the active live-agent context.
       </Alert>
       <div className="director-form-grid">
         <Select

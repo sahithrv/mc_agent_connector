@@ -18,6 +18,8 @@ export interface LlmRequest {
 export interface LlmUsage {
   inputTokens?: number;
   outputTokens?: number;
+  cacheHitInputTokens?: number;
+  cacheMissInputTokens?: number;
 }
 
 export interface LlmPromptMetadata {

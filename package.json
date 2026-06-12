@@ -10,6 +10,7 @@
     "build": "tsc -b && npm --workspace @mc-ai-video/studio-web run build",
     "lint": "tsc -b --pretty false",
     "test": "npm run build && node apps/studio-api/dist/test-runner.js && npm --workspace @mc-ai-video/studio-web run test:run",
+    "live:agents": "npm --workspace @mc-ai-video/studio-api run live-agents",
     "start:api": "npm --workspace @mc-ai-video/studio-api start",
     "start:web": "npm --workspace @mc-ai-video/studio-web run dev"
   },

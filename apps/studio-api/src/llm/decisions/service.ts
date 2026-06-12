@@ -29,7 +29,7 @@ export interface DecisionModelConfig {
 }
 
 export interface AgentDecisionServiceInput {
-  agent: Pick<AgentConfig, "id" | "name" | "role" | "team" | "routine" | "allowedActions">;
+  agent: Pick<AgentConfig, "id" | "name" | "role" | "team" | "subteam" | "leader" | "routine" | "allowedActions">;
   model: DecisionModelConfig;
   staticPersona: StaticPersona;
   dynamicState?: DynamicAgentState;

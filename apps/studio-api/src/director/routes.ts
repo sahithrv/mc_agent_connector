@@ -11,9 +11,35 @@ import type { DirectorCommand } from "../events/types";
 import {
   objectBody,
   optionalString,
+  RequestValidationError,
   requiredString,
   validationResponse,
 } from "../http/validation";
+
+const INJECTION_KINDS = [
+  "personality",
+  "role",
+  "task",
+  "team-task",
+  "god-dialogue",
+  "memory",
+  "trait",
+  "instruction",
+] as const;
+const INJECTION_SCOPES = ["agent", "subteam", "all"] as const;
+const DEFAULT_AGENT_ACTIONS = [
+  "idle",
+  "continue_routine",
+  "move_to",
+  "follow_player",
+  "flee",
+  "mine_block",
+  "collect_item",
+  "place_block",
+  "attack_entity",
+  "chat_public",
+  "chat_ai_private",
+] as const;
 
 export interface DirectorRoutesOptions {
   agents: AgentConfig[];
@@ -130,6 +156,94 @@ export function registerDirectorRoutes(app: FastifyInstance, options: DirectorRo
     }
   });
 
+  app.post("/director/injections", (request, reply) => {
+    try {
+      const source = objectBody(request.body);
+      const kind = requiredEnum(source, "kind", INJECTION_KINDS);
+      const scope = requiredEnum(source, "scope", INJECTION_SCOPES);
+      const text = requiredString(source, "text", 4_000).trim();
+      const taskId = optionalString(source, "taskId", 128);
+      const targetAgentId = scope === "agent"
+        ? requiredString(source, "agentId", 128)
+        : optionalString(source, "agentId", 128);
+      const subteamId = scope === "subteam"
+        ? requiredString(source, "subteamId", 128)
+        : optionalString(source, "subteamId", 128);
+      const meta = optionalCommandMeta(source);
+
+      const commandType = commandTypeForInjection(kind, scope);
+      const command = emitCommand(options.events, {
+        type: commandType,
+        requestedBy: meta.requestedBy ?? "director",
+        targetAgentId,
+        reason: optionalString(source, "reason", 512),
+        payload: compactJson({
+          kind,
+          scope,
+          text,
+          content: text,
+          role: kind === "role" ? text : undefined,
+          task: kind === "task" || kind === "team-task" ? text : undefined,
+          taskId,
+          agentId: targetAgentId,
+          subteamId,
+          secret: booleanValue(source.secret),
+        }),
+      });
+      return reply.status(201).send({ ok: true, command });
+    } catch (error) {
+      const response = validationResponse(error);
+      return reply.status(response.statusCode).send(response.body);
+    }
+  });
+
+  app.post("/director/subteams/:subteamId/task", (request, reply) => {
+    try {
+      const params = objectBody(request.params, "params");
+      const source = objectBody(request.body);
+      const subteamId = requiredString(params, "subteamId", 128);
+      const task = requiredString(source, "task", 4_000).trim();
+      const command = emitCommand(options.events, {
+        type: "set-subteam-task",
+        requestedBy: optionalString(source, "requestedBy", 128) ?? "director",
+        reason: optionalString(source, "reason", 512),
+        payload: compactJson({
+          subteamId,
+          task,
+          taskId: optionalString(source, "taskId", 128),
+        }),
+      });
+      return reply.status(201).send({ ok: true, command });
+    } catch (error) {
+      const response = validationResponse(error);
+      return reply.status(response.statusCode).send(response.body);
+    }
+  });
+
+  app.post("/director/agents", (request, reply) => {
+    try {
+      const agent = agentConfigFromBody(request.body);
+      if (options.agents.some((existing) => existing.id === agent.id)) {
+        return reply.status(409).send({ error: `agent already exists: ${agent.id}` });
+      }
+      if (options.agents.some((existing) => existing.account.username === agent.account.username)) {
+        return reply.status(409).send({ error: `agent username already exists: ${agent.account.username}` });
+      }
+
+      options.agents.push(agent);
+      const command = emitCommand(options.events, {
+        type: "add-agent",
+        requestedBy: "director",
+        targetAgentId: agent.id,
+        payload: { agent: agentConfigJson(agent) },
+      });
+      return reply.status(201).send({ ok: true, agent, command });
+    } catch (error) {
+      const response = validationResponse(error);
+      return reply.status(response.statusCode).send(response.body);
+    }
+  });
+
   app.post("/director/clips", (request, reply) => {
     try {
       const source = objectBody(request.body);
@@ -159,6 +273,89 @@ export function registerDirectorRoutes(app: FastifyInstance, options: DirectorRo
       return reply.status(response.statusCode).send(response.body);
     }
   });
+}
+
+function commandTypeForInjection(
+  kind: (typeof INJECTION_KINDS)[number],
+  scope: (typeof INJECTION_SCOPES)[number],
+): DirectorCommand["type"] {
+  if (kind === "god-dialogue") return "god-dialogue";
+  if (kind === "role" && scope === "agent") return "set-agent-role";
+  if (kind === "task" && scope === "agent") return "set-agent-task";
+  if ((kind === "task" || kind === "team-task") && scope === "subteam") return "set-subteam-task";
+  return "inject-agent-context";
+}
+
+function agentConfigFromBody(body: unknown): AgentConfig {
+  const source = objectBody(body);
+  const account = objectBody(source.account, "account");
+  const allowedActions = stringArrayValue(source.allowedActions) ?? [...DEFAULT_AGENT_ACTIONS];
+  return {
+    id: requiredString(source, "id", 128),
+    name: requiredString(source, "name", 128),
+    account: {
+      username: requiredString(account, "username", 16),
+      auth: account.auth === "microsoft" ? "microsoft" : "offline",
+    },
+    role: requiredString(source, "role", 128),
+    team: optionalString(source, "team", 128),
+    subteam: optionalString(source, "subteam", 128),
+    leader: booleanValue(source.leader),
+    mode: "routine",
+    routine: optionalString(source, "routine", 128),
+    allowedActions,
+    providerRef: optionalString(source, "providerRef", 128) ?? "deepseek",
+    visibility: "ai",
+  };
+}
+
+function agentConfigJson(agent: AgentConfig): Record<string, JsonValue> {
+  return compactJson({
+    id: agent.id,
+    name: agent.name,
+    account: compactJson({
+      username: agent.account.username,
+      auth: agent.account.auth,
+    }),
+    role: agent.role,
+    team: agent.team,
+    subteam: agent.subteam,
+    leader: agent.leader,
+    mode: agent.mode,
+    routine: agent.routine,
+    allowedActions: agent.allowedActions,
+    providerRef: agent.providerRef,
+    visibility: agent.visibility,
+  });
+}
+
+function stringArrayValue(value: unknown): string[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new RequestValidationError("allowedActions must be a non-empty string array");
+  }
+  return value.map((item) => {
+    if (typeof item !== "string" || item.trim().length === 0) {
+      throw new RequestValidationError("allowedActions must contain only non-empty strings");
+    }
+    return item.trim();
+  });
+}
+
+function booleanValue(value: unknown): boolean | undefined {
+  return typeof value === "boolean" ? value : undefined;
+}
+
+function requiredEnum<T extends readonly string[]>(
+  source: Record<string, unknown>,
+  key: string,
+  values: T,
+): T[number] {
+  const value = source[key];
+  if (typeof value !== "string" || !values.includes(value)) {
+    throw new RequestValidationError(`${key} must be one of: ${values.join(", ")}`);
+  }
+  return value;
 }
 
 function requireSessionId(options: DirectorRoutesOptions): string {

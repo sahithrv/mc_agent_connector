@@ -1,20 +1,28 @@
 {
-  "id": "farmer-6",
-  "name": "Rhea",
-  "account": {
-    "username": "RheaBot",
-    "auth": "offline"
-  },
-  "role": "farmer",
-  "team": "ai",
-  "mode": "routine",
-  "routine": "farmer",
-  "allowedActions": [
-    "idle",
-    "chat_public",
-    "chat_ai_private",
-    "collect_item"
-  ],
-  "providerRef": "local-planner",
-  "visibility": "ai"
+    "id":  "farmer-6",
+    "name":  "Rhea",
+    "account":  {
+                    "username":  "RheaBot",
+                    "auth":  "offline"
+                },
+    "role":  "farmer",
+    "team":  "ai",
+    "mode":  "routine",
+    "routine":  "farmer",
+    "allowedActions":  [
+                           "idle",
+                           "chat_public",
+                           "chat_ai_private",
+                           "move_to",
+                           "follow_player",
+                           "flee",
+                           "collect_item",
+                           "craft_item",
+                           "place_block",
+                           "attack_entity"
+                       ],
+    "providerRef":  "deepseek",
+    "visibility":  "ai",
+    "subteam":  "river",
+    "leader":  false
 }

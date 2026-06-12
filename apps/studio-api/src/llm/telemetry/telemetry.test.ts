@@ -60,11 +60,13 @@ test("token telemetry records usage when present and ignores missing usage", () 
   const record = telemetry.record({
     provider: "openai",
     model: "gpt-test",
-    usage: { inputTokens: 100, outputTokens: 20 },
+    usage: { inputTokens: 100, outputTokens: 20, cacheHitInputTokens: 80, cacheMissInputTokens: 20 },
     rate: { inputUsdPer1k: 0.01, outputUsdPer1k: 0.02 },
   });
 
   assert.equal(record?.totalTokens, 120);
+  assert.equal(record?.cacheHitInputTokens, 80);
+  assert.equal(record?.cacheMissInputTokens, 20);
   assert.equal(record?.estimatedCostUsd, 0.0014);
 });
 

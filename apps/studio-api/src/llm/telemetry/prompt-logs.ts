@@ -117,7 +117,16 @@ export function normalizeUsage(usage: LlmUsage | undefined): LlmUsage | undefine
   const normalized: LlmUsage = {};
   if (usage.inputTokens !== undefined) normalized.inputTokens = Math.max(0, usage.inputTokens);
   if (usage.outputTokens !== undefined) normalized.outputTokens = Math.max(0, usage.outputTokens);
-  return normalized.inputTokens === undefined && normalized.outputTokens === undefined
+  if (usage.cacheHitInputTokens !== undefined) {
+    normalized.cacheHitInputTokens = Math.max(0, usage.cacheHitInputTokens);
+  }
+  if (usage.cacheMissInputTokens !== undefined) {
+    normalized.cacheMissInputTokens = Math.max(0, usage.cacheMissInputTokens);
+  }
+  return normalized.inputTokens === undefined
+    && normalized.outputTokens === undefined
+    && normalized.cacheHitInputTokens === undefined
+    && normalized.cacheMissInputTokens === undefined
     ? undefined
     : normalized;
 }

@@ -1,23 +1,25 @@
 import { Button, Badge } from "@mantine/core";
-import { Bell, Crosshair, LockKeyhole, ShieldAlert } from "lucide-react";
+import { Bell, Bot, Crosshair, ShieldAlert, Sparkles } from "lucide-react";
 import { useState } from "react";
 
-import type { injectDirectorEvent, sendDirectorAnnouncement } from "../../lib/api/director";
-import type { RoleAssignmentInput } from "../../lib/api/director";
+import type { addDirectorAgent, injectDirectorCommand, injectDirectorEvent, sendDirectorAnnouncement } from "../../lib/api/director";
 import type { UiAgentRuntime } from "../../lib/types";
-import { AssignRoleForm } from "./AssignRoleForm";
+import { AddAgentForm } from "./AddAgentForm";
+import { ContextInjectionForm } from "./ContextInjectionForm";
 import { GroupAnnouncementForm } from "./GroupAnnouncementForm";
 import { InjectEventForm } from "./InjectEventForm";
 import "./director.css";
 
-type CommandMode = "inject" | "announce" | "role";
+type CommandMode = "event" | "announce" | "context" | "agent";
 
 export interface DirectorCommandPanelProps {
   agents: readonly UiAgentRuntime[];
-  api?: Parameters<typeof injectDirectorEvent>[1] & Parameters<typeof sendDirectorAnnouncement>[1];
+  api?: Parameters<typeof injectDirectorEvent>[1]
+    & Parameters<typeof sendDirectorAnnouncement>[1]
+    & Parameters<typeof injectDirectorCommand>[1]
+    & Parameters<typeof addDirectorAgent>[1];
   onEventInjected?: Parameters<typeof InjectEventForm>[0]["onSuccess"];
   onAnnouncementSent?: Parameters<typeof GroupAnnouncementForm>[0]["onSuccess"];
-  onAssignRole?: (assignment: RoleAssignmentInput) => Promise<void> | void;
 }
 
 export function DirectorCommandPanel({
@@ -25,9 +27,8 @@ export function DirectorCommandPanel({
   api,
   onEventInjected,
   onAnnouncementSent,
-  onAssignRole,
 }: DirectorCommandPanelProps): JSX.Element {
-  const [mode, setMode] = useState<CommandMode>("inject");
+  const [mode, setMode] = useState<CommandMode>("context");
 
   return (
     <section className="director-panel" aria-labelledby="director-panel-title">
@@ -36,19 +37,28 @@ export function DirectorCommandPanel({
           <ShieldAlert size={15} aria-hidden="true" />
           Director Commands
         </div>
-        <Badge variant="light" color={onAssignRole ? "lime" : "yellow"}>
-          role API {onAssignRole ? "ready" : "missing"}
+        <Badge variant="light" color="lime">
+          live context
         </Badge>
       </div>
       <div className="director-toolbar" role="tablist" aria-label="Director command forms">
         <Button
-          data-active={mode === "inject"}
-          leftSection={<Crosshair size={14} />}
-          onClick={() => setMode("inject")}
+          data-active={mode === "context"}
+          leftSection={<Sparkles size={14} />}
+          onClick={() => setMode("context")}
           role="tab"
-          variant={mode === "inject" ? "light" : "subtle"}
+          variant={mode === "context" ? "light" : "subtle"}
         >
-          Inject event
+          Inject
+        </Button>
+        <Button
+          data-active={mode === "event"}
+          leftSection={<Crosshair size={14} />}
+          onClick={() => setMode("event")}
+          role="tab"
+          variant={mode === "event" ? "light" : "subtle"}
+        >
+          Event
         </Button>
         <Button
           data-active={mode === "announce"}
@@ -57,23 +67,24 @@ export function DirectorCommandPanel({
           role="tab"
           variant={mode === "announce" ? "light" : "subtle"}
         >
-          Announcement
+          Chat
         </Button>
         <Button
-          data-active={mode === "role"}
-          leftSection={<LockKeyhole size={14} />}
-          onClick={() => setMode("role")}
+          data-active={mode === "agent"}
+          leftSection={<Bot size={14} />}
+          onClick={() => setMode("agent")}
           role="tab"
-          variant={mode === "role" ? "light" : "subtle"}
+          variant={mode === "agent" ? "light" : "subtle"}
         >
-          Role
+          Agent
         </Button>
       </div>
-      {mode === "inject" ? <InjectEventForm api={api} onSuccess={onEventInjected} /> : null}
+      {mode === "context" ? <ContextInjectionForm agents={agents} api={api} /> : null}
+      {mode === "event" ? <InjectEventForm api={api} onSuccess={onEventInjected} /> : null}
       {mode === "announce" ? (
         <GroupAnnouncementForm api={api} onSuccess={onAnnouncementSent} />
       ) : null}
-      {mode === "role" ? <AssignRoleForm agents={agents} onAssignRole={onAssignRole} /> : null}
+      {mode === "agent" ? <AddAgentForm agents={agents} api={api} /> : null}
     </section>
   );
 }

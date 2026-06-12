@@ -23,6 +23,7 @@ final class BackendClient {
         this.config = config;
         this.logger = logger;
         this.httpClient = HttpClient.newBuilder()
+            .version(HttpClient.Version.HTTP_1_1)
             .connectTimeout(Duration.ofMillis(config.timeoutMs()))
             .build();
     }
@@ -41,7 +42,9 @@ final class BackendClient {
 
         HttpRequest request;
         try {
-            request = HttpRequest.newBuilder(URI.create(config.backendBaseUrl() + config.eventPath()))
+            URI uri = URI.create(config.backendBaseUrl() + config.eventPath());
+            request = HttpRequest.newBuilder(uri)
+                .version(HttpClient.Version.HTTP_1_1)
                 .timeout(Duration.ofMillis(config.timeoutMs()))
                 .header("Content-Type", "application/json")
                 .header(SHARED_SECRET_HEADER, config.sharedSecret())
@@ -52,11 +55,24 @@ final class BackendClient {
             return;
         }
 
+        send(request, event, true);
+    }
+
+    private void send(HttpRequest request, BridgeEvent event, boolean allowRetry) {
         httpClient.sendAsync(request, HttpResponse.BodyHandlers.discarding())
             .orTimeout(config.timeoutMs() + 500L, TimeUnit.MILLISECONDS)
             .whenComplete((response, error) -> {
                 if (error != null) {
-                    logger.log(Level.WARNING, "Failed to forward Minecraft event " + event.type(), error);
+                    if (allowRetry && isRetryable(error)) {
+                        send(request, event, false);
+                        return;
+                    }
+                    logger.warning(
+                        "Failed to forward Minecraft event "
+                            + event.type()
+                            + ": "
+                            + rootMessage(error)
+                    );
                     return;
                 }
 
@@ -67,7 +83,34 @@ final class BackendClient {
                             + " with HTTP "
                             + response.statusCode()
                     );
+                } else {
+                    logger.fine(
+                        "Forwarded Minecraft event "
+                            + event.type()
+                            + " to "
+                            + request.uri()
+                    );
                 }
             });
+    }
+
+    private boolean isRetryable(Throwable error) {
+        Throwable root = rootCause(error);
+        return root instanceof java.io.IOException
+            || root instanceof java.net.ConnectException
+            || root instanceof java.net.http.HttpTimeoutException;
+    }
+
+    private String rootMessage(Throwable error) {
+        Throwable root = rootCause(error);
+        return root.getClass().getSimpleName() + ": " + root.getMessage();
+    }
+
+    private Throwable rootCause(Throwable error) {
+        Throwable current = error;
+        while (current.getCause() != null) {
+            current = current.getCause();
+        }
+        return current;
     }
 }

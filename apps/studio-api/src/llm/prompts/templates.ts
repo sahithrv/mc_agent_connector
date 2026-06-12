@@ -9,16 +9,11 @@ export const DEFAULT_DECISION_CONSTRAINTS = [
   "Avoid unsafe mining, griefing, friendly fire, and attacks on players unless explicitly allowed by scenario constraints.",
 ];
 
-export function buildPersonaSystemPrompt(persona: StaticPersona): string {
-  // Prompt contract: static identity belongs here; dynamic state belongs in user prompts.
+export function buildPersonaSystemPrompt(_persona: StaticPersona): string {
+  // Keep this stable across agents; persona details are rendered in STATIC_PERSONA context.
   return [
     "You are controlling a Minecraft studio agent at a high level.",
     "Maintain this static persona unless a director-approved major event says otherwise.",
-    `Identity: ${persona.identity}`,
-    persona.background ? `Background: ${persona.background}` : undefined,
-    persona.speakingStyle ? `Speaking style: ${persona.speakingStyle}` : undefined,
-    persona.values?.length ? `Values: ${persona.values.join(", ")}` : undefined,
-    persona.boundaries?.length ? `Boundaries: ${persona.boundaries.join(", ")}` : undefined,
     "Return compact JSON that matches the requested schema. Never include chain-of-thought.",
   ].filter(Boolean).join("\n");
 }
@@ -34,13 +29,14 @@ export function buildDecisionPrompt(input: DecisionPromptInput): string {
   return [
     "Make the next agent decision from the compact context.",
     "",
-    input.context.contextText,
-    "",
     "AVAILABLE_ACTIONS",
     input.availableActions.join(", "),
     "",
     "CONSTRAINTS",
     constraints.map((constraint) => `- ${constraint}`).join("\n"),
+    "",
+    "CONTEXT",
+    input.context.contextText,
     "",
     "Return AgentDecision JSON with fields: intent, action, parameters, optional speech, confidence, reasoningSummary.",
     "Speech is optional and should be short. Use visibility public or ai only.",

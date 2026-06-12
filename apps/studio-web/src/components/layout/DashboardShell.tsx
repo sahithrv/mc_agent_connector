@@ -19,7 +19,6 @@ import { LeftNav } from "./LeftNav";
 import { RightInspector } from "./RightInspector";
 import {
   mockAgentControls,
-  mockAssignRole,
   mockDirectorApi,
   mockSendDirectorChat,
 } from "../../lib/mock/api";
@@ -121,7 +120,6 @@ export function DashboardShell(): JSX.Element {
             <EventDirectorWorkspace
               api={mockProps?.directorApi}
               onAnnouncementSent={(message) => studioStore.appendChat(message)}
-              onAssignRole={mockMode ? mockAssignRole : undefined}
             />
           </DashboardBand>
           <DashboardBand id="chat" meta="F13-F16" title="Chat Visibility">

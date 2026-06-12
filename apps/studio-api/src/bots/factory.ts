@@ -1,4 +1,7 @@
 import type { AgentConfig } from "@mc-ai-video/contracts";
+import { Movements, pathfinder } from "mineflayer-pathfinder";
+
+const collectBlockPlugin = require("mineflayer-collectblock").plugin as (bot: unknown) => void;
 
 import type {
   BotFactory,
@@ -26,7 +29,15 @@ export function createMineflayerBotFactory(
         version: options.server.version,
       };
 
-      return options.createBot(createOptions);
+      const bot = options.createBot(createOptions);
+      bot.loadPlugin?.(pathfinder as unknown as (bot: unknown) => void);
+      bot.loadPlugin?.(collectBlockPlugin);
+      bot.on("spawn", () => {
+        if (bot.pathfinder?.setMovements) {
+          bot.pathfinder.setMovements(new Movements(bot as never));
+        }
+      });
+      return bot;
     },
   };
 }

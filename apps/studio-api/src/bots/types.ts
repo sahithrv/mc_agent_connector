@@ -44,6 +44,7 @@ export interface BotBlock {
 
 export interface BotPathfinder {
   goto(goal: unknown): Promise<void>;
+  setMovements?(movements: unknown): void;
   setGoal?(goal: unknown, dynamic?: boolean): void;
   stop?(): void;
 }
@@ -52,8 +53,14 @@ export interface BotCollectBlock {
   collect(entity: BotEntity): Promise<void>;
 }
 
+export interface BotFindBlockOptions {
+  matching: number | number[] | ((block: BotBlock) => boolean);
+  maxDistance?: number;
+}
+
 export interface BotHandle extends BotEventSource {
   username: string;
+  version?: string;
   health?: number;
   food?: number;
   entity?: BotEntity;
@@ -67,6 +74,12 @@ export interface BotHandle extends BotEventSource {
   canDigBlock?(block: BotBlock): boolean;
   dig?(block: BotBlock): Promise<void>;
   attack?(entity: BotEntity): void | Promise<void>;
+  equip?(item: unknown, destination: string): Promise<void>;
+  placeBlock?(block: BotBlock, faceVector: unknown): Promise<void>;
+  findBlock?(options: BotFindBlockOptions): BotBlock | null;
+  recipesFor?(itemType: number, metadata?: number | null, minResultCount?: number, craftingTable?: BotBlock | null): unknown[];
+  craft?(recipe: unknown, count: number, craftingTable?: BotBlock | null): Promise<void>;
+  loadPlugin?(plugin: (bot: unknown) => void): void;
 }
 
 export interface LocalServerConnection {

@@ -176,6 +176,8 @@ test("provider contract and LLM schemas are frozen for V1 integration", () => {
     "flee",
     "collect_item",
     "mine_block",
+    "craft_item",
+    "place_block",
     "attack_entity",
   ]);
   assert.equal(AgentDecisionSchema.safeParse(expectedWarningDecisionOutput).success, true);

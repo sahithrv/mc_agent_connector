@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
@@ -5,6 +6,7 @@ import type { AgentConfig, AgentMode, Visibility } from "@mc-ai-video/contracts"
 
 import { ConfigError } from "./errors";
 import {
+  optionalBoolean,
   optionalString,
   readJsonObject,
   requiredObject,
@@ -16,7 +18,11 @@ const VISIBILITIES = ["ai", "human-team", "recorder", "public"] as const;
 const ACCOUNT_AUTH = ["offline", "microsoft"] as const;
 
 export function defaultAgentsConfigDir(): string {
-  return resolve(process.cwd(), "config", "agents");
+  const cwdConfig = resolve(process.cwd(), "config", "agents");
+  if (existsSync(cwdConfig)) {
+    return cwdConfig;
+  }
+  return resolve(process.cwd(), "..", "..", "config", "agents");
 }
 
 export async function loadAgentConfigs(
@@ -42,6 +48,7 @@ export async function loadAgentConfigs(
   assertUnique(agents.map((agent) => agent.id), "agent id", dirPath);
   assertUnique(agents.map((agent) => agent.name), "agent name", dirPath);
   assertUnique(agents.map((agent) => agent.account.username), "account username", dirPath);
+  assertSingleLeaderPerSubteam(agents, dirPath);
 
   return agents;
 }
@@ -61,12 +68,29 @@ function parseAgentConfig(source: Record<string, unknown>, filePath: string): Ag
     },
     role: requiredString(source, "role", filePath),
     team: optionalString(source, "team", filePath),
+    subteam: optionalString(source, "subteam", filePath),
+    leader: optionalBoolean(source, "leader", filePath),
     mode,
     routine: optionalString(source, "routine", filePath),
     allowedActions: requiredStringArray(source, "allowedActions", filePath),
     providerRef: requiredString(source, "providerRef", filePath),
     visibility,
   };
+}
+
+function assertSingleLeaderPerSubteam(agents: AgentConfig[], filePath: string): void {
+  const leaders = new Map<string, string>();
+  for (const agent of agents) {
+    if (agent.leader !== true) {
+      continue;
+    }
+    const subteam = agent.subteam ?? agent.team ?? "ai";
+    const existing = leaders.get(subteam);
+    if (existing) {
+      throw new ConfigError(`duplicate leader for subteam ${subteam}: ${existing}, ${agent.id}`, filePath);
+    }
+    leaders.set(subteam, agent.id);
+  }
 }
 
 function requiredStringArray(

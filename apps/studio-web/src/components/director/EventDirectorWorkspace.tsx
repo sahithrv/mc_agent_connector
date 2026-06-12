@@ -4,7 +4,6 @@ import { useMemo, useState } from "react";
 import { ClipPanel } from "../clips/ClipPanel";
 import { EventFeed, EventFilters } from "../events";
 import type { injectDirectorEvent, sendDirectorAnnouncement } from "../../lib/api/director";
-import type { RoleAssignmentInput } from "../../lib/api/director";
 import { useStudioStore } from "../../lib/state/store";
 import type { UiAgentRuntime } from "../../lib/types";
 import { emptyEventFilters, type EventFilterState } from "../../lib/events/filters";
@@ -16,7 +15,6 @@ export interface EventDirectorWorkspaceProps {
   agents?: readonly UiAgentRuntime[];
   api?: Parameters<typeof injectDirectorEvent>[1] & Parameters<typeof sendDirectorAnnouncement>[1];
   onAnnouncementSent?: (message: AiChatMessage) => void;
-  onAssignRole?: (assignment: RoleAssignmentInput) => Promise<void> | void;
 }
 
 export function EventDirectorWorkspace({
@@ -24,7 +22,6 @@ export function EventDirectorWorkspace({
   agents,
   api,
   onAnnouncementSent,
-  onAssignRole,
 }: EventDirectorWorkspaceProps): JSX.Element {
   const storeEvents = useStudioStore((state) => state.events);
   const storeAgents = useStudioStore((state) => state.agents);
@@ -52,7 +49,6 @@ export function EventDirectorWorkspace({
           agents={allAgents}
           api={api}
           onAnnouncementSent={onAnnouncementSent}
-          onAssignRole={onAssignRole}
           onEventInjected={handleEventInjected}
         />
         <ClipPanel api={api} events={allEvents} />

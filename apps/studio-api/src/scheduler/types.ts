@@ -66,6 +66,7 @@ export type SchedulerEvent =
         | "scheduler.planning.started"
         | "scheduler.planning.finished"
         | "scheduler.action.started"
+        | "scheduler.action.queued"
         | "scheduler.action.finished"
         | "scheduler.action.canceled"
         | "scheduler.action.rejected";

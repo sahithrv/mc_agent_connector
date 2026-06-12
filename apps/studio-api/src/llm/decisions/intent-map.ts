@@ -11,6 +11,8 @@ export type HighLevelIntent =
   | "retreat"
   | "gather_item"
   | "mine_resource"
+  | "craft_needed_item"
+  | "build_structure"
   | "defend_from_hostile"
   | "ask_for_help";
 
@@ -69,6 +71,18 @@ export const INTENT_ACTION_MAP: readonly IntentActionMapping[] = [
     intent: "mine_resource",
     action: "mine_block",
     description: "Mine a visible safe block needed for the goal.",
+    parameterHints: ["position", "block"],
+  },
+  {
+    intent: "craft_needed_item",
+    action: "craft_item",
+    description: "Craft a needed item from inventory ingredients, using a nearby crafting table when available.",
+    parameterHints: ["item", "count", "useCraftingTable"],
+  },
+  {
+    intent: "build_structure",
+    action: "place_block",
+    description: "Place an inventory block at a nearby reachable position.",
     parameterHints: ["position", "block"],
   },
   {

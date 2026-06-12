@@ -130,6 +130,7 @@ export class BotLifecycleManager {
     event: BotLifecycleEvent,
     error: string,
   ): void {
+    console.warn(`[live-bot] ${agentId} ${event}: ${error}`);
     const bot = this.registry.getBot(agentId);
     if (bot) {
       this.clearBotListeners(agentId, bot);

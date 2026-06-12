@@ -51,6 +51,13 @@ test("default sample agent configs load 20 agents", async () => {
   assert.equal(agents.filter((agent) => agent.role === "farmer").length, 8);
   assert.equal(agents.filter((agent) => agent.role === "miner").length, 7);
   assert.equal(agents.filter((agent) => agent.role === "guard").length, 5);
+  assert.deepEqual([...new Set(agents.map((agent) => agent.subteam))].sort(), [
+    "ember",
+    "iron",
+    "oak",
+    "river",
+  ]);
+  assert.equal(agents.filter((agent) => agent.leader === true).length, 4);
 });
 
 test("loadAgentConfigs rejects bad agent config before server start", async () => {
@@ -97,6 +104,7 @@ function validAgent(id: string, name: string, username: string) {
     },
     role: "farmer",
     team: "ai",
+    subteam: "test-team",
     mode: "routine",
     routine: "farmer",
     allowedActions: ["idle", "chat_ai_private"],

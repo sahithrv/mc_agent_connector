@@ -1,23 +1,29 @@
 {
-  "id": "miner-7",
-  "name": "Hale",
-  "account": {
-    "username": "HaleBot",
-    "auth": "offline"
-  },
-  "role": "miner",
-  "team": "ai",
-  "mode": "routine",
-  "routine": "miner",
-  "allowedActions": [
-    "idle",
-    "chat_public",
-    "chat_ai_private",
-    "move_to",
-    "flee",
-    "collect_item",
-    "mine_block"
-  ],
-  "providerRef": "local-planner",
-  "visibility": "ai"
+    "id":  "miner-7",
+    "name":  "Hale",
+    "account":  {
+                    "username":  "HaleBot",
+                    "auth":  "offline"
+                },
+    "role":  "miner",
+    "team":  "ai",
+    "mode":  "routine",
+    "routine":  "miner",
+    "allowedActions":  [
+                           "idle",
+                           "chat_public",
+                           "chat_ai_private",
+                           "move_to",
+                           "follow_player",
+                           "flee",
+                           "collect_item",
+                           "mine_block",
+                           "craft_item",
+                           "place_block",
+                           "attack_entity"
+                       ],
+    "providerRef":  "deepseek",
+    "visibility":  "ai",
+    "subteam":  "ember",
+    "leader":  false
 }

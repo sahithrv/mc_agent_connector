@@ -12,6 +12,7 @@ import type {
   DirectorClipInput,
   DirectorClipMarker,
   DirectorEventInput,
+  DirectorInjectionInput,
   RoleAssignmentInput,
 } from "../api/director";
 import type { PendingDirectorCommand, UiAgentRuntime } from "../types";
@@ -20,6 +21,7 @@ import { isoAt, makeMockEvent, mockStudioData } from "./data";
 
 interface MockDirectorResponse {
   ok: true;
+  agent?: UiAgentRuntime;
   event?: GameEvent;
   message?: AiChatMessage;
   marker?: DirectorClipMarker;
@@ -69,6 +71,61 @@ export const mockDirectorApi = {
         kind: "manual",
       };
       return response<T>({ marker, command: command("mark-clip", { markerId: marker.id }) });
+    }
+
+    if (pathname === "/director/injections") {
+      const input = body as Partial<DirectorInjectionInput>;
+      const type = input.kind === "god-dialogue"
+        ? "god-dialogue"
+        : input.kind === "role" && input.scope === "agent"
+          ? "set-agent-role"
+          : input.kind === "task" && input.scope === "agent"
+            ? "set-agent-task"
+            : (input.kind === "task" || input.kind === "team-task") && input.scope === "subteam"
+              ? "set-subteam-task"
+              : "inject-agent-context";
+      return response<T>({
+        command: command(type, {
+          kind: text(input.kind, "instruction"),
+          scope: text(input.scope, "all"),
+          text: text(input.text, "Mock injection"),
+          role: input.kind === "role" ? text(input.text, "Role") : "",
+          task: input.kind === "task" || input.kind === "team-task" ? text(input.text, "Task") : "",
+          agentId: optionalText(input.agentId) ?? "",
+          subteamId: optionalText(input.subteamId) ?? "",
+        }, optionalText(input.agentId)),
+      });
+    }
+
+    if (pathname === "/director/agents") {
+      const input = body as {
+        id?: string;
+        name?: string;
+        role?: string;
+        team?: string;
+        subteam?: string;
+        leader?: boolean;
+        account?: { username?: string };
+        providerRef?: string;
+      };
+      const agent: UiAgentRuntime = {
+        id: text(input.id, `agent-${Date.now()}`),
+        name: text(input.name, "New Agent"),
+        account: { username: text(input.account?.username, "NewAgent") },
+        role: text(input.role, "Scout"),
+        team: optionalText(input.team) ?? "ai",
+        subteam: optionalText(input.subteam),
+        leader: input.leader === true,
+        mode: "routine",
+        allowedActions: ["idle", "continue_routine", "chat_ai_private"],
+        providerRef: optionalText(input.providerRef) ?? "deepseek",
+      };
+      const snapshot = studioStore.getSnapshot();
+      studioStore.reset({ ...snapshot, agents: [...snapshot.agents, agent] });
+      return response<T>({
+        agent,
+        command: command("add-agent", { agent: agent as unknown as Record<string, JsonValue> }, agent.id),
+      });
     }
 
     if (pathname === "/chat/messages") {

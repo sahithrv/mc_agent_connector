@@ -29,6 +29,8 @@ export interface AgentConfig {
   };
   role: string;
   team?: string;
+  subteam?: string;
+  leader?: boolean;
   mode?: AgentMode;
   routine?: string;
   allowedActions: string[];

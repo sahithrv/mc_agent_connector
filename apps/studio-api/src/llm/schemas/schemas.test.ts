@@ -32,6 +32,63 @@ test("AgentDecision rejects unknown actions", () => {
   assert.equal(result.success, false);
 });
 
+test("AgentDecision normalizes common private speech variants", () => {
+  const result = AgentDecisionSchema.parse({
+    intent: "follow leader",
+    action: "follow_player",
+    parameters: { username: "JunoBot", range: 2 },
+    speech: {
+      visibility: "ai only",
+      text: "Following Juno to build site.",
+    },
+    confidence: 0.9,
+    reasoningSummary: "Task says follow leader.",
+  });
+
+  assert.equal(result.speech?.visibility, "ai");
+  assert.equal(result.speech?.content, "Following Juno to build site.");
+});
+
+test("AgentDecision normalizes boolean public speech shape", () => {
+  const result = AgentDecisionSchema.parse({
+    intent: "follow leader",
+    action: "follow_player",
+    parameters: { username: "QuinBot", range: 5 },
+    speech: {
+      public: false,
+      message: "Following leader to build site.",
+    },
+    confidence: 0.9,
+    reasoningSummary: "Task says follow leader.",
+  });
+
+  assert.equal(result.speech?.visibility, "ai");
+  assert.equal(result.speech?.content, "Following leader to build site.");
+});
+
+test("AgentDecision normalizes DeepSeek-style wrapped speech aliases", () => {
+  const result = AgentDecisionSchema.parse({
+    result: {
+      intent: "coordinate privately",
+      action: "chat_ai_private",
+      params: { topic: "site_claim" },
+      speech: {
+        public: false,
+        message: "Claiming the site now.",
+        recipients: ["leader"],
+      },
+      confidence: 0.74,
+      reasoning_summary: "Use private team speech for coordination.",
+    },
+  });
+
+  assert.deepEqual(result.parameters, { topic: "site_claim" });
+  assert.equal(result.reasoningSummary, "Use private team speech for coordination.");
+  assert.equal(result.speech?.visibility, "ai");
+  assert.equal(result.speech?.content, "Claiming the site now.");
+  assert.deepEqual(result.speech?.recipientIds, ["leader"]);
+});
+
 test("ReflectionResult clamps relationship values to 0-100", () => {
   const result = ReflectionResultSchema.parse({
     emotionalState: "alarmed",

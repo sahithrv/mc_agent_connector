@@ -118,6 +118,64 @@ test("long actions are canceled when an agent is attacked", async () => {
   assert.ok(events.some((item) => item.type === "scheduler.action.canceled"));
 });
 
+test("planned actions queue when action slots are full and run later", async () => {
+  const agents = [agent("a"), agent("b"), agent("c")];
+  const started: string[] = [];
+  const queued: string[] = [];
+  const resolvers: Array<() => void> = [];
+  const scheduler = createScheduler({
+    agents,
+    maxConcurrentActions: 1,
+    maxPlanningSlots: 3,
+    events: {
+      publish(event) {
+        if (event.type === "scheduler.action.queued") queued.push(event.agentId);
+      },
+    },
+    planner: {
+      async plan(agent) {
+        return {
+          action: {
+            action: "idle",
+            params: { durationMs: 1 },
+            timeoutMs: 1_000,
+            requestedBy: "test",
+          },
+          note: agent.id,
+        };
+      },
+    },
+    actions: {
+      canRun: () => true,
+      async run(_agent, request) {
+        started.push(request.agentId);
+        await new Promise<void>((resolve) => resolvers.push(resolve));
+        return result(request, true);
+      },
+    },
+  });
+
+  agents.forEach((item) => scheduler.queuePlanning(item.id));
+  await scheduler.tick();
+  await Promise.resolve();
+
+  assert.deepEqual(started, ["a"]);
+  assert.deepEqual(queued.sort(), ["b", "c"]);
+
+  resolvers.shift()?.();
+  await scheduler.waitForIdle();
+  await scheduler.tick();
+  assert.deepEqual(started, ["a", "b"]);
+
+  resolvers.shift()?.();
+  await scheduler.waitForIdle();
+  await scheduler.tick();
+  assert.deepEqual(started, ["a", "b", "c"]);
+
+  resolvers.shift()?.();
+  await scheduler.waitForIdle();
+});
+
 function createScheduler(overrides: {
   agents: AgentConfig[];
   planner?: DecisionPlanner;
@@ -127,6 +185,7 @@ function createScheduler(overrides: {
   events?: { publish(event: SchedulerEvent): void };
   reflection?: { requestReflection(request: { agentIds: string[] }): void };
   maxPlanningSlots?: number;
+  maxConcurrentActions?: number;
 }): AgentScheduler {
   return new AgentScheduler({
     agents: overrides.agents,
@@ -142,7 +201,7 @@ function createScheduler(overrides: {
     events: overrides.events,
     reflection: overrides.reflection,
     config: {
-      maxConcurrentActions: 4,
+      maxConcurrentActions: overrides.maxConcurrentActions ?? 4,
       maxPlanningSlots: overrides.maxPlanningSlots ?? 2,
       planningCooldownMs: 0,
     },

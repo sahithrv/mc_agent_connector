@@ -36,6 +36,8 @@ export function buildPromptContext(input: PromptContextInput): PromptContext {
         `name=${input.agent.name}`,
         `role=${input.agent.role}`,
         input.agent.team ? `team=${input.agent.team}` : undefined,
+        input.agent.subteam ? `subteam=${input.agent.subteam}` : undefined,
+        input.agent.leader === true ? "subteamLeader=true" : undefined,
         input.agent.routine ? `routine=${input.agent.routine}` : undefined,
       ]),
       required: true,

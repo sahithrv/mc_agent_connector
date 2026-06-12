@@ -14,6 +14,8 @@ export interface TokenCostRecord {
   model: string;
   inputTokens: number;
   outputTokens: number;
+  cacheHitInputTokens: number;
+  cacheMissInputTokens: number;
   totalTokens: number;
   estimatedCostUsd?: number;
   createdAt: string;
@@ -40,7 +42,9 @@ export class InMemoryTokenCostTelemetryRepository implements TokenCostTelemetryR
   public record(input: RecordTokenCostInput): TokenCostRecord | undefined {
     const inputTokens = input.usage?.inputTokens ?? 0;
     const outputTokens = input.usage?.outputTokens ?? 0;
-    if (!input.usage || (inputTokens === 0 && outputTokens === 0)) {
+    const cacheHitInputTokens = input.usage?.cacheHitInputTokens ?? 0;
+    const cacheMissInputTokens = input.usage?.cacheMissInputTokens ?? 0;
+    if (!input.usage || (inputTokens === 0 && outputTokens === 0 && cacheHitInputTokens === 0 && cacheMissInputTokens === 0)) {
       return undefined;
     }
 
@@ -51,6 +55,8 @@ export class InMemoryTokenCostTelemetryRepository implements TokenCostTelemetryR
       model: input.model,
       inputTokens,
       outputTokens,
+      cacheHitInputTokens,
+      cacheMissInputTokens,
       totalTokens: inputTokens + outputTokens,
       estimatedCostUsd: input.rate
         ? (inputTokens / 1000) * input.rate.inputUsdPer1k

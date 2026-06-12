@@ -1,0 +1,18 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 3100,
+    "logger": true
+  },
+  "tickRates": {
+    "schedulerMs": 1000,
+    "routineMs": 2000,
+    "perceptionMs": 500
+  },
+  "database": {
+    "path": "./data/studio.sqlite"
+  },
+  "llm": {
+    "maxConcurrency": 2
+  }
+}

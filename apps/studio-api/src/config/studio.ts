@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
 import {
@@ -29,7 +30,11 @@ export interface StudioConfig {
 }
 
 export function defaultStudioConfigPath(): string {
-  return resolve(process.cwd(), "config", "studio.config.json");
+  const cwdConfig = resolve(process.cwd(), "config", "studio.config.json");
+  if (existsSync(cwdConfig)) {
+    return cwdConfig;
+  }
+  return resolve(process.cwd(), "..", "..", "config", "studio.config.json");
 }
 
 export async function loadStudioConfig(

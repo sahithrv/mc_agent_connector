@@ -30,6 +30,7 @@ export class ActionRegistry {
   async run(
     request: ActionRequest,
     context: ActionRuntimeContext,
+    externalSignal?: AbortSignal,
   ): Promise<ActionResult> {
     const startedAt = new Date().toISOString();
     const action = this.actions.get(request.action);
@@ -56,6 +57,14 @@ export class ActionRegistry {
     }
 
     const controller = new AbortController();
+    const abortFromExternalSignal = (): void => {
+      controller.abort(externalSignal?.reason ?? "action canceled");
+    };
+    if (externalSignal?.aborted) {
+      abortFromExternalSignal();
+    } else {
+      externalSignal?.addEventListener("abort", abortFromExternalSignal, { once: true });
+    }
     const runContext: ActionRunContext = {
       ...context,
       request,
@@ -63,7 +72,11 @@ export class ActionRegistry {
       signal: controller.signal,
     };
 
-    return this.runWithTimeout(action, runContext, timeoutMs, controller);
+    try {
+      return await this.runWithTimeout(action, runContext, timeoutMs, controller);
+    } finally {
+      externalSignal?.removeEventListener("abort", abortFromExternalSignal);
+    }
   }
 
   private async runWithTimeout(

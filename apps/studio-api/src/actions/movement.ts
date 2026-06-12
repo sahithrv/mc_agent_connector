@@ -1,4 +1,5 @@
 import type { Position } from "@mc-ai-video/contracts";
+import { goals } from "mineflayer-pathfinder";
 
 import type { BotEntity, BotHandle, BotPathfinder } from "../bots/types";
 import { distance, numberParam, positionParam, stringParam } from "./params";
@@ -35,7 +36,7 @@ export function createMoveToAction(): RegisteredAction {
       }
 
       const range = numberParam(context.request.params, "range") ?? 1;
-      const result = await gotoGoal(context, { type: "move_to", position: target, range });
+      const result = await startGoal(context, new goals.GoalNear(target.x, target.y, target.z, range), false);
       return result ?? actionSucceeded(context.request, context.startedAt, { reached: true });
     },
   };
@@ -63,12 +64,7 @@ export function createFollowPlayerAction(): RegisteredAction {
       }
 
       const range = numberParam(context.request.params, "range") ?? 3;
-      const result = await gotoGoal(context, {
-        type: "follow_player",
-        entityId: String(target.id),
-        username,
-        range,
-      });
+      const result = await startGoal(context, new goals.GoalFollow(target as never, range), true);
       return result ?? actionSucceeded(context.request, context.startedAt, { followed: username });
     },
   };
@@ -100,16 +96,21 @@ export function createFleeAction(): RegisteredAction {
         return actionFailed(context.request, context.startedAt, "no safe flee goal found");
       }
 
-      const result = await gotoGoal(context, { type: "flee", position: target, range: 2 });
+      const result = await startGoal(context, new goals.GoalNear(target.x, target.y, target.z, 2), false);
       return result ?? actionSucceeded(context.request, context.startedAt, { target });
     },
   };
 }
 
-async function gotoGoal(context: ActionRunContext, goal: unknown) {
+async function startGoal(context: ActionRunContext, goal: unknown, dynamic: boolean) {
   const pathfinder = context.bot?.pathfinder;
   if (!pathfinder) {
     return actionFailed(context.request, context.startedAt, "pathfinder is not available");
+  }
+
+  if (pathfinder.setGoal) {
+    pathfinder.setGoal(goal, dynamic);
+    return undefined;
   }
 
   const stopOnAbort = (): void => pathfinder.stop?.();

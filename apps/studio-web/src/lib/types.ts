@@ -70,7 +70,13 @@ export interface PendingDirectorCommand {
     | "resume-all"
     | "inject-event"
     | "send-ai-chat"
-    | "mark-clip";
+    | "mark-clip"
+    | "inject-agent-context"
+    | "set-agent-role"
+    | "set-agent-task"
+    | "set-subteam-task"
+    | "god-dialogue"
+    | "add-agent";
   requestedBy?: string;
   targetAgentId?: string;
   reason?: string;

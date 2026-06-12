@@ -39,3 +39,34 @@ test("guard routine warns instead of attacking protected players", () => {
 
   assert.equal(result.action?.action, "chat_public");
 });
+
+test("guard routine does not warn just because an ally is protected", () => {
+  const routine = new GuardRoutine();
+  const result = routine.run(
+    {
+      id: "guard",
+      name: "Guard",
+      role: "guard",
+      team: "red",
+      routine: "guard",
+      allowedActions: ["move_to", "chat_public"],
+    },
+    {
+      agentId: "guard",
+      health: 20,
+      inventory: { tools: [], seeds: 0 },
+      visibleBlocks: [],
+      nearbyEntities: [],
+      nearbyPlayers: [
+        {
+          id: "ally-1",
+          name: "AllyBot",
+          protected: true,
+        },
+      ],
+      patrolPoints: [{ x: 8, y: 64, z: 0 }],
+    },
+  );
+
+  assert.equal(result.action?.action, "move_to");
+});
