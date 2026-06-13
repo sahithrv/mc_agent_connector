@@ -11,7 +11,10 @@ import {
   type ActionResultContext,
   type DynamicAgentState,
   type MemoryContext,
+  type PromptActionAffordance,
   type PromptPerceptionSnapshot,
+  type PromptRecoveryContext,
+  type PromptTaskState,
   type RelationshipContext,
   type StaticPersona,
 } from "../prompts";
@@ -42,10 +45,14 @@ export interface AgentDecisionServiceInput {
   relationships?: RelationshipContext[];
   memories?: MemoryContext[];
   recentActionResults?: ActionResultContext[];
+  affordances?: PromptActionAffordance[];
+  recovery?: PromptRecoveryContext;
+  taskState?: PromptTaskState;
   recentChat?: AiChatMessage[];
   recentEvents?: GameEvent[];
   activeScenario?: ActiveScenarioContext;
   availableActions?: AgentDecision["action"][];
+  availableSkills?: string[];
   constraints?: string[];
   maxContextChars?: number;
 }
@@ -67,36 +74,8 @@ export class AgentDecisionService {
   public constructor(private readonly providers: LlmProviderRegistry) {}
 
   public async decide(input: AgentDecisionServiceInput): Promise<AgentDecisionServiceResult> {
-    const context = buildPromptContext({
-      agent: input.agent,
-      staticPersona: input.staticPersona,
-      dynamicState: input.dynamicState,
-      perception: input.perception,
-      relationships: input.relationships,
-      memories: input.memories,
-      recentActionResults: input.recentActionResults,
-      recentChat: input.recentChat,
-      recentEvents: input.recentEvents,
-      activeScenario: input.activeScenario,
-      maxChars: input.maxContextChars,
-    });
     const availableActions = input.availableActions ?? allowedDecisionActionsForAgent(input.agent);
-    const request: LlmRequest = {
-      provider: input.model.provider,
-      model: input.model.model,
-      system: buildPersonaSystemPrompt(input.staticPersona),
-      messages: [{
-        role: "user",
-        content: buildDecisionPrompt({
-          context,
-          availableActions: promptActionDescriptions(availableActions),
-          constraints: input.constraints,
-        }),
-      }],
-      schemaName: "AgentDecision",
-      temperature: input.model.temperature ?? DEFAULT_TEMPERATURE,
-      timeoutMs: input.model.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-    };
+    const request = this.buildRequest(input, availableActions);
 
     const result = await this.providers.generateStructured(request, AgentDecisionSchema);
     if (!result.ok) {
@@ -163,6 +142,77 @@ export class AgentDecisionService {
       fallback: false,
       usage: result.usage,
       request,
+    };
+  }
+
+  public async repairRejectedDecision(input: {
+    input: AgentDecisionServiceInput;
+    previousDecision: AgentDecision;
+    reason: string;
+  }): Promise<AgentDecisionServiceResult | undefined> {
+    const availableActions = input.input.availableActions ?? allowedDecisionActionsForAgent(input.input.agent);
+    const request = this.buildRequest(input.input, availableActions);
+    return this.repairDecision({
+      input: input.input,
+      request,
+      availableActions,
+      reason: input.reason,
+      previousDecision: input.previousDecision,
+    });
+  }
+
+  public fallbackForRejection(input: {
+    input: AgentDecisionServiceInput;
+    reason: string;
+    rejection?: DecisionRejection;
+  }): AgentDecisionServiceResult {
+    const availableActions = input.input.availableActions ?? allowedDecisionActionsForAgent(input.input.agent);
+    const request = this.buildRequest(input.input, availableActions);
+    return this.withFallback(
+      input.input,
+      request,
+      availableActions,
+      input.reason,
+      input.rejection,
+    );
+  }
+
+  private buildRequest(
+    input: AgentDecisionServiceInput,
+    availableActions: AgentDecision["action"][],
+  ): LlmRequest {
+    const context = buildPromptContext({
+      agent: input.agent,
+      staticPersona: input.staticPersona,
+      dynamicState: input.dynamicState,
+      perception: input.perception,
+      relationships: input.relationships,
+      memories: input.memories,
+      recentActionResults: input.recentActionResults,
+      affordances: input.affordances,
+      recovery: input.recovery,
+      taskState: input.taskState,
+      recentChat: input.recentChat,
+      recentEvents: input.recentEvents,
+      activeScenario: input.activeScenario,
+      maxChars: input.maxContextChars,
+    });
+    return {
+      provider: input.model.provider,
+      model: input.model.model,
+      system: buildPersonaSystemPrompt(input.staticPersona),
+      messages: [{
+        role: "user",
+        content: buildDecisionPrompt({
+          context,
+          availableActions: promptActionDescriptions(availableActions),
+          availableSkills: input.availableSkills,
+          constraints: input.constraints,
+        }),
+      }],
+      schemaName: "AgentDecision",
+      temperature: input.model.temperature ?? DEFAULT_TEMPERATURE,
+      timeoutMs: input.model.timeoutMs ?? DEFAULT_TIMEOUT_MS,
     };
   }
 
@@ -270,7 +320,7 @@ function buildDecisionRepairPrompt(input: {
     "ACTION_PARAMETER_RULES",
     ACTION_PARAMETER_RULES.map((rule) => `- ${rule}`).join("\n"),
     "",
-    "Return only AgentDecision JSON with fields: intent, action, parameters, optional speech, confidence, reasoningSummary.",
+    "Return only AgentDecision JSON with fields: intent, action, parameters, optional goal, optional skill, optional skillParams, optional expectedOutcome, optional recoveryIfFails, optional speech, confidence, reasoningSummary.",
   ].filter((line): line is string => line !== undefined).join("\n");
 }
 

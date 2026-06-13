@@ -8,4 +8,5 @@ export {
 export * from "./contract";
 export * from "./fallback";
 export * from "./intent-map";
+export * from "./plan-service";
 export * from "./service";

@@ -2,6 +2,7 @@ export * from "./basic";
 export * from "./build";
 export * from "./combat";
 export * from "./crafting";
+export * from "./farming";
 export * from "./movement";
 export * from "./registry";
 export * from "./resource";
@@ -11,6 +12,7 @@ import { createChatAiPrivateAction, createChatPublicAction, createIdleAction } f
 import { createPlaceBlockAction } from "./build";
 import { createAttackEntityAction } from "./combat";
 import { createCraftItemAction } from "./crafting";
+import { createHarvestCropAction, createPlantCropAction } from "./farming";
 import { createFleeAction, createFollowPlayerAction, createMoveToAction } from "./movement";
 import { ActionRegistry } from "./registry";
 import { createCollectItemAction, createMineBlockAction } from "./resource";
@@ -25,6 +27,8 @@ export function createDefaultActionRegistry(): ActionRegistry {
   registry.register(createFleeAction());
   registry.register(createCollectItemAction());
   registry.register(createMineBlockAction());
+  registry.register(createHarvestCropAction());
+  registry.register(createPlantCropAction());
   registry.register(createCraftItemAction());
   registry.register(createPlaceBlockAction());
   registry.register(createAttackEntityAction());

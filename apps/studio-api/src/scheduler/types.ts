@@ -33,6 +33,7 @@ export interface SchedulerConfig {
   maxConcurrentActions: number;
   maxPlanningSlots: number;
   planningCooldownMs: number;
+  roundRobinPlanning?: boolean;
 }
 
 export interface PlannerDecision {

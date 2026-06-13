@@ -1,6 +1,7 @@
-import type { ActionResult, JsonValue, Position } from "@mc-ai-video/contracts";
+import type { ActionResult, JsonValue } from "@mc-ai-video/contracts";
 
 import type { DecisionSource } from "./decision-trace";
+import { targetKeyForAction } from "./action-target-key";
 
 export interface ActionHistoryEntry {
   requestId: string;
@@ -48,7 +49,7 @@ export class ActionHistoryStore {
       data: result.data ? { ...result.data } : undefined,
       startedAt: result.startedAt,
       completedAt: result.completedAt,
-      targetKey: result.targetKey ?? targetKeyFromParams(result.params) ?? targetKeyFromData(result.data),
+      targetKey: historyTargetKey(result.action, result.params, result.targetKey),
       requestedBy: result.requestedBy,
       source: result.source,
     };
@@ -113,48 +114,29 @@ function compactJson(value: JsonValue, depth = 0): JsonValue {
   return compacted;
 }
 
-function targetKeyFromParams(params: Record<string, JsonValue> | undefined): string | undefined {
-  if (!params) {
-    return undefined;
+function historyTargetKey(
+  action: string,
+  params: Record<string, JsonValue> | undefined,
+  explicitTargetKey: string | undefined,
+): string {
+  const generated = targetKeyForAction(action, params ?? {});
+  if (!explicitTargetKey || !isUnspecifiedGeneratedKey(action, generated)) {
+    return generated;
   }
-  for (const key of ["targetKey", "username", "player", "target", "entityId", "item", "block", "blueprintId"]) {
-    const value = params[key];
-    if (typeof value === "string" && value.trim().length > 0) {
-      return `${key}:${value.trim()}`;
-    }
-  }
-  const position = positionValue(params.position);
-  return position ? `position:${formatPosition(position)}` : undefined;
+  return explicitTargetKey.startsWith(`${normalizeAction(action)}:`)
+    ? explicitTargetKey
+    : `${normalizeAction(action)}:${explicitTargetKey}`;
 }
 
-function targetKeyFromData(data: Record<string, JsonValue> | undefined): string | undefined {
-  if (!data) {
-    return undefined;
-  }
-  const target = data.target ?? data.reached ?? data.followed ?? data.collected ?? data.mined ?? data.placed;
-  if (typeof target === "string" && target.trim().length > 0) {
-    return `result:${target.trim()}`;
-  }
-  return undefined;
+function isUnspecifiedGeneratedKey(action: string, targetKey: string): boolean {
+  const normalized = normalizeAction(action);
+  return targetKey === `${normalized}:unknown`
+    || targetKey === `${normalized}:unknown:1`
+    || targetKey.startsWith(`${normalized}:unknown:unknown`);
 }
 
-function positionValue(value: JsonValue | undefined): Position | undefined {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return undefined;
-  }
-  const source = value as Partial<Position>;
-  return typeof source.x === "number" && typeof source.y === "number" && typeof source.z === "number"
-    ? { x: source.x, y: source.y, z: source.z, world: source.world }
-    : undefined;
-}
-
-function formatPosition(position: Position): string {
-  const base = `${round(position.x)},${round(position.y)},${round(position.z)}`;
-  return position.world ? `${base},${position.world}` : base;
-}
-
-function round(value: number): string {
-  return Number.isInteger(value) ? String(value) : value.toFixed(1);
+function normalizeAction(value: string): string {
+  return value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "") || "unknown_action";
 }
 
 function clampInteger(value: number, min: number, max: number): number {

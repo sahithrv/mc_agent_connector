@@ -25,9 +25,14 @@ export const AiSpeechProposalSchema = z.preprocess(normalizeSpeech, z.object({
 }));
 
 export const AgentDecisionSchema = z.preprocess(normalizeDecision, z.object({
+  goal: z.string().trim().min(1).max(240).optional(),
+  skill: z.string().trim().min(1).max(80).optional(),
+  skillParams: JsonRecordSchema.optional(),
   intent: z.string().trim().min(1).max(120),
   action: AgentDecisionActionSchema,
   parameters: JsonRecordSchema.default({}),
+  expectedOutcome: z.string().trim().min(1).max(240).optional(),
+  recoveryIfFails: z.string().trim().min(1).max(240).optional(),
   speech: AiSpeechProposalSchema.optional(),
   confidence: z.number().finite().min(0).max(1),
   reasoningSummary: z.string().trim().min(1).max(240),
@@ -44,12 +49,17 @@ function normalizeDecision(value: unknown): unknown {
 
   const wrapped = objectValue(root.decision) ?? objectValue(root.agentDecision) ?? objectValue(root.result);
   const source = wrapped ?? root;
-  return {
+  return compactUndefined({
     ...source,
+    goal: source.goal ?? source.objective,
+    skill: source.skill ?? source.skillName,
+    skillParams: source.skillParams ?? source.skill_params ?? source.skillParameters ?? source.skill_parameters,
+    expectedOutcome: source.expectedOutcome ?? source.expected_outcome,
+    recoveryIfFails: source.recoveryIfFails ?? source.recovery_if_fails,
     parameters: source.parameters ?? source.params ?? {},
     speech: source.speech ?? undefined,
     reasoningSummary: source.reasoningSummary ?? source.reasoning_summary ?? source.summary ?? source.reasoning,
-  };
+  });
 }
 
 function normalizeSpeech(value: unknown): unknown {
@@ -98,4 +108,10 @@ function objectValue(value: unknown): Record<string, unknown> | undefined {
   return typeof value === "object" && value !== null && !Array.isArray(value)
     ? value as Record<string, unknown>
     : undefined;
+}
+
+function compactUndefined(source: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(source).filter(([, value]) => value !== undefined),
+  );
 }

@@ -24,7 +24,7 @@ test("ActionHistoryStore keeps recent results with failure details and metadata"
   assert.equal(latest?.params.block, "iron_ore");
   assert.equal(latest?.requestedBy, "llm");
   assert.equal(latest?.source, "fallback");
-  assert.equal(latest?.targetKey, "block:iron_ore");
+  assert.equal(latest?.targetKey, "mine_block:unknown:21,64,1");
 });
 
 function actionResult(index: number): ActionResult {

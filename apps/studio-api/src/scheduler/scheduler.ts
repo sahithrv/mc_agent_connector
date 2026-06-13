@@ -23,6 +23,7 @@ export class AgentScheduler {
   private readonly now: () => number;
   private readonly idFactory: () => string;
   private reflection?: ReflectionService;
+  private planningCursor = 0;
   private pendingActionCursor = 0;
   private readonly routineIdleTraces = new Map<string, { key: string; at: number }>();
 
@@ -118,19 +119,7 @@ export class AgentScheduler {
     const now = this.now();
 
     this.startPendingActions();
-
-    // Priority stays deterministic: queued planners fill limited slots by agent id order.
-    for (const agent of this.agents) {
-      if (this.activePlanningCount() >= this.deps.config.maxPlanningSlots) break;
-      const state = this.states.get(agent.id);
-      if (
-        state?.publicState.planningQueued &&
-        !state.publicState.planning &&
-        now >= state.publicState.nextPlanAt
-      ) {
-        this.startPlanning(agent, state);
-      }
-    }
+    this.startQueuedPlanning(now);
 
     for (const agent of this.agents) {
       const state = this.states.get(agent.id);
@@ -236,6 +225,32 @@ export class AgentScheduler {
       state.pendingAction = undefined;
       this.actionRunner.start(agent, state, intent);
       this.pendingActionCursor = (index + 1) % this.agents.length;
+    }
+  }
+
+  private startQueuedPlanning(now: number): void {
+    if (this.agents.length === 0) {
+      return;
+    }
+
+    const useRoundRobin = this.deps.config.roundRobinPlanning !== false;
+    const startIndex = useRoundRobin ? this.planningCursor % this.agents.length : 0;
+    for (let offset = 0; offset < this.agents.length; offset += 1) {
+      if (this.activePlanningCount() >= this.deps.config.maxPlanningSlots) break;
+      const index = (startIndex + offset) % this.agents.length;
+      const agent = this.agents[index];
+      if (!agent) continue;
+      const state = this.states.get(agent.id);
+      if (
+        state?.publicState.planningQueued &&
+        !state.publicState.planning &&
+        now >= state.publicState.nextPlanAt
+      ) {
+        this.startPlanning(agent, state);
+        if (useRoundRobin) {
+          this.planningCursor = (index + 1) % this.agents.length;
+        }
+      }
     }
   }
 

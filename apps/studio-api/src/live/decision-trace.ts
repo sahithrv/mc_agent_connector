@@ -4,6 +4,7 @@ import type { GameEvent, JsonValue, Position } from "@mc-ai-video/contracts";
 
 import type { StudioEventBus } from "../events/bus";
 import type { RoutineActionIntent } from "../routines";
+import { targetKeyForAction as actionTargetKeyForAction } from "./action-target-key";
 
 export type DecisionSource =
   | "routine"
@@ -11,6 +12,7 @@ export type DecisionSource =
   | "opportunistic_collect"
   | "competitive"
   | "team_goal"
+  | "skill"
   | "llm"
   | "llm_repair"
   | "fallback"
@@ -89,7 +91,7 @@ export function targetKeyFromAction(action: RoutineActionIntent | undefined): st
   if (!action) {
     return undefined;
   }
-  return action.targetKey ?? targetKeyFromParams(action.params);
+  return action.targetKey ?? actionTargetKeyForAction(action.action, action.params);
 }
 
 export function targetKeyFromParams(params: Record<string, JsonValue> | undefined): string | undefined {

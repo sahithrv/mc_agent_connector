@@ -9,7 +9,7 @@ import type {
   Visibility,
 } from "@mc-ai-video/contracts";
 
-import { normalizeAgentActions } from "../agents/default-actions";
+import { defaultAgentActions, normalizeConfiguredAgentActions } from "../agents/default-actions";
 import { ConfigError } from "./errors";
 import {
   optionalBoolean,
@@ -65,6 +65,8 @@ function parseAgentConfig(source: Record<string, unknown>, filePath: string): Ag
   const visibility = optionalEnum(source, "visibility", VISIBILITIES, filePath) as Visibility | undefined;
   const auth = optionalEnum(account, "auth", ACCOUNT_AUTH, filePath);
 
+  const configuredActions = optionalStringArray(source, "allowedActions", filePath);
+
   return {
     id: requiredString(source, "id", filePath),
     name: requiredString(source, "name", filePath),
@@ -81,7 +83,9 @@ function parseAgentConfig(source: Record<string, unknown>, filePath: string): Ag
     behavior: optionalBehavior(source, filePath),
     mode,
     routine: optionalString(source, "routine", filePath),
-    allowedActions: normalizeAgentActions(requiredStringArray(source, "allowedActions", filePath)),
+    allowedActions: configuredActions
+      ? normalizeConfiguredAgentActions(configuredActions)
+      : defaultAgentActions(),
     providerRef: requiredString(source, "providerRef", filePath),
     visibility,
   };
@@ -153,12 +157,15 @@ function optionalBehaviorEnum<T extends readonly string[]>(
   return value;
 }
 
-function requiredStringArray(
+function optionalStringArray(
   source: Record<string, unknown>,
   field: string,
   filePath: string,
-): string[] {
+): string[] | undefined {
   const value = source[field];
+  if (value === undefined) {
+    return undefined;
+  }
   if (!Array.isArray(value) || value.length === 0) {
     throw new ConfigError(`${field} must be a non-empty string array`, filePath);
   }
@@ -170,7 +177,6 @@ function requiredStringArray(
     return item;
   });
 
-  assertUnique(values, field, filePath);
   return values;
 }
 

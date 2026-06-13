@@ -44,6 +44,50 @@ test("20 agents tick without exceeding configured LLM planning slots", async () 
   assert.ok(maxSeen <= 3);
 });
 
+test("planning slots rotate across queued agents when slots are limited", async () => {
+  const agents = [agent("a"), agent("b"), agent("c")];
+  const started: string[] = [];
+  let resolvers: Array<() => void> = [];
+  const scheduler = createScheduler({
+    agents,
+    maxPlanningSlots: 1,
+    planner: {
+      async plan(item) {
+        started.push(item.id);
+        await new Promise<void>((resolve) => resolvers.push(resolve));
+        return {};
+      },
+    },
+  });
+
+  agents.forEach((item) => scheduler.queuePlanning(item.id));
+
+  await scheduler.tick();
+  await Promise.resolve();
+  assert.deepEqual(started, ["a"]);
+  resolvers.shift()?.();
+  await scheduler.waitForIdle();
+
+  await scheduler.tick();
+  await Promise.resolve();
+  assert.deepEqual(started, ["a", "b"]);
+  resolvers.shift()?.();
+  await scheduler.waitForIdle();
+
+  await scheduler.tick();
+  await Promise.resolve();
+  assert.deepEqual(started, ["a", "b", "c"]);
+  resolvers.shift()?.();
+  await scheduler.waitForIdle();
+
+  agents.forEach((item) => scheduler.queuePlanning(item.id));
+  await scheduler.tick();
+  await Promise.resolve();
+  assert.deepEqual(started, ["a", "b", "c", "a"]);
+  resolvers.shift()?.();
+  await scheduler.waitForIdle();
+});
+
 test("severe events wake targeted agents and request reflection", () => {
   const agents = [
     agent("leader", "leader", "red"),

@@ -5,6 +5,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { defaultAgentsConfigDir, loadAgentConfigs } from "./agents";
+import { defaultAgentActions } from "../agents/default-actions";
 import { ConfigError } from "./errors";
 import { loadStudioConfig } from "./studio";
 
@@ -43,6 +44,20 @@ test("loadAgentConfigs loads valid agent configs deterministically", async () =>
   const agents = await loadAgentConfigs(dir);
 
   assert.deepEqual(agents.map((agent) => agent.id), ["agent-a", "agent-b"]);
+  assert.deepEqual(agents[0]?.allowedActions, ["idle", "chat_ai_private"]);
+  assert.equal(agents[0]?.allowedActions.includes("mine_block"), false);
+});
+
+test("loadAgentConfigs uses default actions only when allowedActions is omitted", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "agent-config-default-actions-"));
+  await mkdir(dir, { recursive: true });
+  const agent: Record<string, unknown> = validAgent("agent-a", "Ada", "AdaBot");
+  delete agent.allowedActions;
+  await writeFile(join(dir, "a.json"), JSON.stringify(agent), "utf8");
+
+  const agents = await loadAgentConfigs(dir);
+
+  assert.deepEqual(agents[0]?.allowedActions, defaultAgentActions());
 });
 
 test("default sample agent configs load 20 agents", async () => {

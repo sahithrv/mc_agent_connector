@@ -6,9 +6,12 @@ import type {
   ActionResultContext,
   DynamicAgentState,
   MemoryContext,
+  PromptActionAffordance,
   PromptContext,
   PromptContextInput,
+  PromptPlanStep,
   PromptPerceptionSnapshot,
+  PromptRecoveryContext,
   RelationshipContext,
   StaticPersona,
 } from "./types";
@@ -31,6 +34,14 @@ export function buildPromptContext(input: PromptContextInput): PromptContext {
       required: true,
     },
     {
+      title: "RECOVERY",
+      body: renderRecovery(input.recovery),
+    },
+    {
+      title: "CURRENT_PLAN",
+      body: renderTaskState(input.taskState),
+    },
+    {
       title: "AGENT",
       body: lines([
         `id=${input.agent.id}`,
@@ -46,6 +57,14 @@ export function buildPromptContext(input: PromptContextInput): PromptContext {
     {
       title: "PERCEPTION",
       body: renderPerception(input.perception),
+    },
+    {
+      title: "EXECUTABLE_NOW",
+      body: renderExecutableAffordances(input.affordances),
+    },
+    {
+      title: "BLOCKED_USEFUL_ACTIONS",
+      body: renderBlockedAffordances(input.affordances),
     },
     {
       title: "SCENARIO",
@@ -196,6 +215,124 @@ function renderRecentActionResults(results: ActionResultContext[] | undefined): 
   );
 }
 
+function renderRecovery(recovery: PromptRecoveryContext | undefined): string {
+  if (!recovery || (!recovery.stuck && !recovery.blockedTargetKeys?.length && !recovery.hint)) {
+    return "";
+  }
+  return lines([
+    `stuck=${recovery.stuck}`,
+    recovery.reason ? `reason=${recovery.reason}` : undefined,
+    recovery.blockedTargetKeys?.length ? `blockedTargetKeys=${recovery.blockedTargetKeys.join(", ")}` : undefined,
+    recovery.hint ? `hint=${recovery.hint}` : undefined,
+    "constraint=choose a different action/target or satisfy the blocker before retrying",
+  ]);
+}
+
+function renderTaskState(taskState: PromptContextInput["taskState"]): string {
+  if (!taskState) {
+    return "";
+  }
+  const header = lines([
+    taskState.goal ? `goal=${taskState.goal}` : undefined,
+    taskState.currentStepId ? `currentStep=${taskState.currentStepId}` : undefined,
+    `updatedAt=${taskState.updatedAt}`,
+  ]);
+  const steps = renderLines(
+    taskState.plan.map((step) => renderPlanStep(step)),
+  );
+  return [header, steps || "plan=not generated yet"].filter(Boolean).join("\n");
+}
+
+function renderPlanStep(step: PromptPlanStep): string {
+  const parts = [
+    `[${step.status}]`,
+    `${step.id}: ${step.description}`,
+    step.nextAction ? `nextAction=${step.nextAction}` : undefined,
+    step.skill ? `skill=${step.skill}` : undefined,
+    step.successCondition ? `success=${JSON.stringify(step.successCondition)}` : undefined,
+    step.neededItems ? `needs=${compactNeededItems(step.neededItems)}` : undefined,
+    step.target !== undefined ? `target=${compactDataValue(step.target)}` : undefined,
+    step.blocker ? `blocker=${JSON.stringify(step.blocker)}` : undefined,
+  ];
+  return parts.filter((part): part is string => Boolean(part)).join(" ");
+}
+
+function compactNeededItems(items: Record<string, number>): string {
+  return Object.entries(items)
+    .slice(0, 5)
+    .map(([item, count]) => `${item}x${count}`)
+    .join(",");
+}
+
+function renderExecutableAffordances(affordances: PromptActionAffordance[] | undefined): string {
+  return renderLines(
+    orderedAffordances(affordances, false)
+      .slice(0, 10)
+      .map((affordance) =>
+        `${affordance.action} ${renderAffordanceTarget(affordance)} score=${formatScore(affordance.score)} reason=${JSON.stringify(affordance.reason)}`.trim(),
+      ),
+  );
+}
+
+function renderBlockedAffordances(affordances: PromptActionAffordance[] | undefined): string {
+  return renderLines(
+    orderedAffordances(affordances, true)
+      .slice(0, 8)
+      .map((affordance) =>
+        `${affordance.action} ${renderAffordanceTarget(affordance)} blocked=${JSON.stringify(affordance.blockedReason ?? "blocked")}`.trim(),
+      ),
+  );
+}
+
+function orderedAffordances(
+  affordances: PromptActionAffordance[] | undefined,
+  blocked: boolean,
+): PromptActionAffordance[] {
+  return [...(affordances ?? [])]
+    .filter((affordance) => Boolean(affordance.blocked) === blocked)
+    .sort((left, right) =>
+      Number(right.advancesGoal ?? false) - Number(left.advancesGoal ?? false)
+      || right.score - left.score
+      || left.action.localeCompare(right.action)
+      || renderAffordanceTarget(left).localeCompare(renderAffordanceTarget(right)),
+    );
+}
+
+function renderAffordanceTarget(affordance: PromptActionAffordance): string {
+  const params = affordance.params;
+  switch (affordance.action) {
+    case "craft_item": {
+      const item = firstString([params.item, params.name, params.block]) ?? "item";
+      const count = numericParam(params.count);
+      return count ? `${item} x${count}` : item;
+    }
+    case "mine_block": {
+      const block = firstString([params.block, params.name]) ?? "block";
+      const position = positionFromValue(params.position);
+      return position ? `${block} at ${renderPosition(position)}` : block;
+    }
+    case "move_to": {
+      const position = positionFromValue(params.position) ?? positionFromParams(params);
+      return position ? renderPosition(position) : "target";
+    }
+    case "place_block": {
+      const block = firstString([params.block, params.item, params.name]);
+      const position = positionFromValue(params.position) ?? positionFromParams(params);
+      return [block, position ? `at ${renderPosition(position)}` : undefined].filter(Boolean).join(" ") || "target";
+    }
+    case "follow_player":
+      return firstString([params.username, params.player, params.target]) ?? "player";
+    case "collect_item":
+      return firstString([params.item, params.name, params.entityId]) ?? "item";
+    case "attack_entity":
+      return firstString([params.username, params.name, params.target, params.entityId]) ?? "entity";
+    case "flee":
+      return firstString([params.username, params.target, params.entityId]) ?? renderOptionalPosition(params) ?? "threat";
+    default:
+      return affordance.targetKey ? readableTargetKey(affordance.targetKey) : "";
+  }
+}
+
 function renderRecentChat(messages: AiChatMessage[] | undefined): string {
   return renderList(
     "recentChat",
@@ -283,6 +420,10 @@ function firstString(values: Array<JsonValue | undefined>): string | undefined {
   return undefined;
 }
 
+function numericParam(value: JsonValue | undefined): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
 function positionFromValue(value: JsonValue | undefined): Position | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return undefined;
@@ -291,6 +432,17 @@ function positionFromValue(value: JsonValue | undefined): Position | undefined {
   return typeof record.x === "number" && typeof record.y === "number" && typeof record.z === "number"
     ? { x: record.x, y: record.y, z: record.z, world: record.world }
     : undefined;
+}
+
+function positionFromParams(params: Record<string, JsonValue>): Position | undefined {
+  return typeof params.x === "number" && typeof params.y === "number" && typeof params.z === "number"
+    ? { x: params.x, y: params.y, z: params.z }
+    : undefined;
+}
+
+function renderOptionalPosition(params: Record<string, JsonValue>): string | undefined {
+  const position = positionFromValue(params.position) ?? positionFromParams(params);
+  return position ? renderPosition(position) : undefined;
 }
 
 function compactData(data: Record<string, JsonValue>): string {
@@ -314,6 +466,10 @@ function renderPosition(position: Position): string {
 
 function round(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(1);
+}
+
+function formatScore(value: number): string {
+  return Math.max(0, Math.min(1, value)).toFixed(2);
 }
 
 function lines(values: Array<string | undefined>): string {

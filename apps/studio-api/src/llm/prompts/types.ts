@@ -8,6 +8,7 @@ import type {
 } from "@mc-ai-video/contracts";
 
 import type { ScenarioConfig } from "../../scenario/types";
+import type { AgentDecision } from "../schemas/agent-decision";
 
 export interface StaticPersona {
   identity: string;
@@ -64,6 +65,43 @@ export interface ActiveScenarioContext {
   visibleSecretRoles?: string[];
 }
 
+export interface PromptActionAffordance {
+  action: AgentDecision["action"];
+  params: Record<string, JsonValue>;
+  score: number;
+  reason: string;
+  advancesGoal?: boolean;
+  blocked?: boolean;
+  blockedReason?: string;
+  targetKey?: string;
+}
+
+export interface PromptRecoveryContext {
+  stuck: boolean;
+  reason?: string;
+  blockedTargetKeys?: string[];
+  hint?: string;
+}
+
+export interface PromptPlanStep {
+  id: string;
+  description: string;
+  status: "pending" | "active" | "done" | "blocked" | "failed";
+  neededItems?: Record<string, number>;
+  target?: JsonValue;
+  blocker?: string;
+  successCondition?: string;
+  nextAction?: string;
+  skill?: string;
+}
+
+export interface PromptTaskState {
+  goal?: string;
+  currentStepId?: string;
+  updatedAt: string;
+  plan: PromptPlanStep[];
+}
+
 export interface PromptPerceptionSnapshot
   extends Partial<Omit<PerceptionSnapshot, "nearbyPlayers">> {
   visibleBlocks?: Array<Record<string, JsonValue>>;
@@ -80,6 +118,9 @@ export interface PromptContextInput {
   relationships?: RelationshipContext[];
   memories?: MemoryContext[];
   recentActionResults?: ActionResultContext[];
+  affordances?: PromptActionAffordance[];
+  recovery?: PromptRecoveryContext;
+  taskState?: PromptTaskState;
   recentChat?: AiChatMessage[];
   recentEvents?: GameEvent[];
   activeScenario?: ActiveScenarioContext;

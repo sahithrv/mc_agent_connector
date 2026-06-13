@@ -15,6 +15,8 @@ const ALL_ACTIONS = [
   "flee",
   "collect_item",
   "mine_block",
+  "harvest_crop",
+  "plant_crop",
   "craft_item",
   "place_block",
   "attack_entity",

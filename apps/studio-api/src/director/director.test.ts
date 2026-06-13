@@ -106,6 +106,31 @@ test("director can add an agent to the active session", async () => {
   assert.equal(commands[0]?.type, "add-agent");
   assert.equal(commands[0]?.targetAgentId, "spy-1");
   assert.equal(response.json().agent.role, "Spy");
+  assert.ok(response.json().agent.allowedActions.includes("mine_block"));
+  await app.close();
+});
+
+test("director add-agent keeps configured allowedActions exact", async () => {
+  const eventBus = new StudioEventBus();
+  const agents = [agent("farmer-1")];
+  const app = createApp({ studioConfig: testConfig(), agents, eventBus });
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/director/agents",
+    payload: {
+      id: "limited-1",
+      name: "Limited One",
+      account: { username: "LimitedOne", auth: "offline" },
+      role: "farmer",
+      allowedActions: ["move_to", "chat_ai_private"],
+      providerRef: "deepseek",
+    },
+  });
+
+  assert.equal(response.statusCode, 201);
+  assert.deepEqual(response.json().agent.allowedActions, ["move_to", "chat_ai_private"]);
+  assert.equal(response.json().agent.allowedActions.includes("mine_block"), false);
   await app.close();
 });
 

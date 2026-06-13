@@ -1,4 +1,4 @@
-import type { ActionResult, AgentConfig, Position } from "@mc-ai-video/contracts";
+import type { ActionResult, AgentConfig, JsonValue, Position } from "@mc-ai-video/contracts";
 
 import type { BotHandle } from "../bots/types";
 import { isPlaceableMaterialName } from "../materials";
@@ -259,7 +259,7 @@ export class TeamGoalController {
       return;
     }
 
-    if (!result.ok) return;
+    if (!result.ok || hasExplicitNoProgress(result)) return;
     if (result.action === "mine_block") state.progress.minedBlocks += 1;
     if (result.action === "collect_item") state.progress.collectedItems += 1;
     if (result.action === "place_block") state.progress.placedBlocks += 1;
@@ -788,6 +788,17 @@ function isSpecificResourceItemType(type: string): boolean {
 
 function entityName(entity: { name?: string; displayName?: string; type?: string }): string {
   return entity.name ?? entity.displayName ?? entity.type ?? "";
+}
+
+function hasExplicitNoProgress(result: ActionResult): boolean {
+  const signal = objectValue(result.data?.progressSignal);
+  return signal?.baseline === true && signal.changed === false;
+}
+
+function objectValue(value: JsonValue | undefined): Record<string, JsonValue> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, JsonValue>
+    : undefined;
 }
 
 function hasPlaceableInventory(bot: BotHandle | undefined): boolean {

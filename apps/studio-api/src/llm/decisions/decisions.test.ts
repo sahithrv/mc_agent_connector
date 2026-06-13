@@ -4,6 +4,7 @@ import test from "node:test";
 import { LlmProviderRegistry } from "../providers";
 import { llmError, type LlmProvider, type LlmRequest } from "../providers/types";
 import { AgentDecisionSchema, type AgentDecision } from "../schemas/agent-decision";
+import { AgentPlanService } from "./plan-service";
 import { AgentDecisionService } from "./service";
 
 test("decision service returns validated AgentDecision from mock provider", async () => {
@@ -56,6 +57,212 @@ test("decision service includes recent action results in the decision prompt", a
   assert.match(prompt, /mine_block target=iron_ore@12,64,-9 ok=false/);
   assert.match(prompt, /missing valid tool for block: iron_ore/);
   assert.match(prompt, /do not repeat the same failed action-target pair/);
+});
+
+test("decision service includes recovery section in the decision prompt", async () => {
+  const registry = new LlmProviderRegistry();
+  registry.register(mockProvider({
+    intent: "recover from blocked mining",
+    action: "craft_item",
+    parameters: { item: "stone_pickaxe" },
+    confidence: 0.82,
+    reasoningSummary: "Craft the missing tool before retrying the blocked target.",
+  }));
+
+  const service = new AgentDecisionService(registry);
+  const result = await service.decide({
+    ...baseInput(),
+    recovery: {
+      stuck: true,
+      reason: "same failed action-target pair repeated within 60 seconds: mine_block:world:1,64,2",
+      blockedTargetKeys: ["mine_block:world:1,64,2"],
+      hint: "Avoid retrying mine_block:world:1,64,2; craft a stone pickaxe first.",
+    },
+    availableActions: ["idle", "continue_routine", "craft_item"],
+  });
+
+  const prompt = result.request.messages[0]?.content ?? "";
+  assert.match(prompt, /RECOVERY/);
+  assert.match(prompt, /blockedTargetKeys=mine_block:world:1,64,2/);
+  assert.match(prompt, /choose a different action\/target or satisfy the blocker/);
+});
+
+test("decision service includes current task plan in the decision prompt", async () => {
+  const registry = new LlmProviderRegistry();
+  registry.register(mockProvider({
+    intent: "place shelter wall",
+    action: "place_block",
+    parameters: { position: { x: 4, y: 64, z: 2 }, block: "oak_planks" },
+    confidence: 0.82,
+    reasoningSummary: "Advance the active shelter plan step.",
+  }));
+
+  const service = new AgentDecisionService(registry);
+  const result = await service.decide({
+    ...baseInput(),
+    taskState: {
+      goal: "Build a starter shelter",
+      currentStepId: "place-walls",
+      updatedAt: "2026-06-13T00:00:00.000Z",
+      plan: [
+        {
+          id: "place-walls",
+          description: "Place wall blocks near the claimed site",
+          status: "active",
+          nextAction: "place_block",
+          successCondition: "first wall blocks are placed",
+        },
+        {
+          id: "roof",
+          description: "Add roof blocks",
+          status: "pending",
+          nextAction: "place_block",
+        },
+      ],
+    },
+    availableActions: ["idle", "continue_routine", "place_block"],
+  });
+
+  const prompt = result.request.messages[0]?.content ?? "";
+  assert.match(prompt, /CURRENT_PLAN/);
+  assert.match(prompt, /goal=Build a starter shelter/);
+  assert.match(prompt, /\[active\] place-walls/);
+  assert.match(prompt, /nextAction=place_block/);
+});
+
+test("plan service requests a concise grounded AgentTaskPlan", async () => {
+  const registry = new LlmProviderRegistry();
+  const requests: LlmRequest[] = [];
+  registry.register({
+    name: "mock",
+    async generateStructured(request, schema) {
+      requests.push(request);
+      return {
+        ok: true,
+        value: schema.parse({
+          goal: "Gather wood for tools",
+          currentStepId: "collect-wood",
+          steps: [
+            {
+              id: "collect-wood",
+              description: "Collect visible oak logs",
+              status: "active",
+              successCondition: "at least four logs are available",
+              nextAction: "mine_block",
+              target: { block: "oak_log" },
+            },
+            {
+              id: "craft-planks",
+              description: "Craft logs into planks",
+              status: "pending",
+              successCondition: "planks are in inventory",
+              nextAction: "craft_item",
+              neededItems: { oak_log: 1 },
+            },
+            {
+              id: "craft-sticks",
+              description: "Craft sticks for tools",
+              status: "pending",
+              successCondition: "sticks are in inventory",
+              nextAction: "craft_item",
+            },
+          ],
+          reasoningSummary: "Wood is visible and needed for tool crafting.",
+        }),
+        usage: { inputTokens: 12, outputTokens: 8 },
+      };
+    },
+  });
+
+  const service = new AgentPlanService(registry);
+  const result = await service.updatePlan({
+    ...baseInput(),
+    goal: "Gather wood for tools",
+    trigger: "new_goal",
+    affordances: [{
+      action: "mine_block",
+      params: { block: "oak_log", position: { x: 2, y: 64, z: 1 } },
+      score: 0.9,
+      reason: "oak_log is visible and needed for tools",
+      advancesGoal: true,
+    }],
+    availableActions: ["idle", "continue_routine", "mine_block", "craft_item"],
+    availableSkills: ["gather_wood: mine visible logs and craft planks"],
+  });
+
+  assert.equal(result.fallback, false);
+  assert.equal(result.request.schemaName, "AgentTaskPlan");
+  assert.equal(requests.length, 1);
+  assert.equal(result.plan.steps.length, 3);
+  assert.equal(result.plan.currentStepId, "collect-wood");
+  assert.equal(result.plan.steps[0]?.nextAction, "mine_block");
+  assert.match(result.request.messages[0]?.content ?? "", /PLAN_UPDATE_TRIGGER=new_goal/);
+  assert.match(result.request.messages[0]?.content ?? "", /Return 3 to 8 concise steps/);
+  assert.match(result.request.messages[0]?.content ?? "", /EXECUTABLE_NOW/);
+});
+
+test("plan service falls back to an affordance-grounded plan on provider errors", async () => {
+  const registry = new LlmProviderRegistry();
+  registry.register(timeoutProvider());
+
+  const service = new AgentPlanService(registry);
+  const result = await service.updatePlan({
+    ...baseInput(),
+    goal: "Mine stone for a base",
+    trigger: "empty_plan",
+    affordances: [
+      {
+        action: "craft_item",
+        params: { item: "wooden_pickaxe" },
+        score: 0.9,
+        reason: "craft pickaxe to mine stone",
+        advancesGoal: true,
+      },
+      {
+        action: "mine_block",
+        params: { block: "stone", position: { x: 1, y: 64, z: 2 } },
+        score: 0.8,
+        reason: "stone is visible",
+        advancesGoal: true,
+        blocked: true,
+        blockedReason: "missing pickaxe",
+      },
+    ],
+    availableActions: ["idle", "continue_routine", "craft_item", "mine_block"],
+  });
+
+  assert.equal(result.fallback, true);
+  assert.match(result.fallbackReason ?? "", /timeout/);
+  assert.equal(result.plan.steps.length >= 3, true);
+  assert.equal(result.plan.steps[0]?.status, "active");
+  assert.equal(result.plan.steps.some((step) => step.nextAction === "craft_item"), true);
+});
+
+test("decision service advertises optional skill choices in the decision prompt", async () => {
+  const registry = new LlmProviderRegistry();
+  registry.register(mockProvider({
+    goal: "Gather wood for tools",
+    skill: "gather_wood",
+    skillParams: { count: 4 },
+    intent: "gather wood",
+    action: "mine_block",
+    parameters: { position: { x: 2, y: 64, z: 1 }, block: "oak_log" },
+    confidence: 0.8,
+    reasoningSummary: "Use the wood gathering skill for the multi-step goal.",
+  }));
+
+  const service = new AgentDecisionService(registry);
+  const result = await service.decide({
+    ...baseInput(),
+    availableActions: ["idle", "continue_routine", "mine_block"],
+    availableSkills: ["gather_wood: mine visible logs and search nearby"],
+  });
+
+  const prompt = result.request.messages[0]?.content ?? "";
+  assert.equal(result.decision.skill, "gather_wood");
+  assert.match(prompt, /AVAILABLE_SKILLS/);
+  assert.match(prompt, /gather_wood/);
+  assert.match(prompt, /Skill selection is optional/);
 });
 
 test("provider error returns safe fallback with reason", async () => {

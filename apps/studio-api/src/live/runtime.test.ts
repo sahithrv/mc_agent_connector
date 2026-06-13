@@ -8,6 +8,8 @@ import { fakeBot } from "../actions/test-helpers";
 import type { BotHandle } from "../bots/types";
 import { StudioEventBus } from "../events/bus";
 import { AgentState, CompetitiveTeamOrchestrator } from "../competitive";
+import { LlmProviderRegistry } from "../llm/providers";
+import type { LlmRequest } from "../llm/providers/types";
 import { createLiveAgentRuntime } from "./runtime";
 
 const ALL_ACTIONS = [
@@ -382,9 +384,375 @@ test("live runtime records action result history from the action.result subscrip
   assert.equal(history.length, 1);
   assert.equal(history[0]?.error, "missing valid tool for block: iron_ore");
   assert.equal(history[0]?.params.block, "iron_ore");
-  assert.equal(history[0]?.targetKey, "block:iron_ore");
+  assert.equal(history[0]?.targetKey, "mine_block:unknown:8,63,-2");
   assert.equal(history[0]?.requestedBy, "llm");
   assert.equal(history[0]?.source, "llm");
+
+  await live.stop();
+});
+
+test("live runtime generates a task plan once and reuses it on later planning ticks", async () => {
+  const agents = [agent("planner-1", "PlannerOne", true)];
+  const registry = new AgentRegistry(agents);
+  const eventBus = new StudioEventBus();
+  const providers = new LlmProviderRegistry();
+  const requests: LlmRequest[] = [];
+  providers.register({
+    name: "mock",
+    async generateStructured(request, schema) {
+      requests.push(request);
+      if (request.schemaName === "AgentTaskPlan") {
+        return {
+          ok: true,
+          value: schema.parse({
+            goal: "Build a starter shelter",
+            currentStepId: "collect-materials",
+            steps: [
+              {
+                id: "collect-materials",
+                description: "Collect visible shelter materials",
+                status: "active",
+                successCondition: "usable blocks are available",
+                nextAction: "chat_ai_private",
+              },
+              {
+                id: "place-walls",
+                description: "Place first shelter wall blocks",
+                status: "pending",
+                successCondition: "wall blocks are placed",
+                nextAction: "chat_ai_private",
+              },
+              {
+                id: "report",
+                description: "Report the result or blocker",
+                status: "pending",
+                successCondition: "leader receives a concrete update",
+                nextAction: "chat_ai_private",
+              },
+            ],
+            reasoningSummary: "Start with materials, then build, then report blockers.",
+          }),
+        };
+      }
+      return {
+        ok: true,
+        value: schema.parse({
+          intent: "wait for executable context",
+          action: "idle",
+          parameters: { durationMs: 1 },
+          confidence: 0.55,
+          reasoningSummary: "No bot perception is available in this test.",
+        }),
+      };
+    },
+  });
+
+  const live = createLiveAgentRuntime({
+    agents,
+    registry,
+    eventBus,
+    providers,
+    tickMs: 1_000,
+    maxConcurrentActions: 1,
+    maxPlanningSlots: 1,
+    planningCooldownMs: 0,
+  });
+
+  eventBus.emit("director.command", {
+    id: "agent-task",
+    type: "set-agent-task",
+    targetAgentId: "planner-1",
+    payload: { task: "Build a starter shelter" },
+    timestamp: new Date(0).toISOString(),
+  });
+
+  await live.scheduler.tick();
+  await live.scheduler.waitForIdle();
+  await live.scheduler.waitForIdle();
+
+  assert.equal(requests.filter((request) => request.schemaName === "AgentTaskPlan").length, 1);
+  assert.equal(live.taskState.stateFor("planner-1").plan.length, 3);
+  assert.match(
+    requests.find((request) => request.schemaName === "AgentDecision")?.messages[0]?.content ?? "",
+    /CURRENT_PLAN/,
+  );
+
+  live.scheduler.queuePlanning("planner-1", { type: "manual" });
+  await live.scheduler.tick();
+  await live.scheduler.waitForIdle();
+  await live.scheduler.waitForIdle();
+
+  assert.equal(requests.filter((request) => request.schemaName === "AgentTaskPlan").length, 1);
+  assert.equal(live.taskState.stateFor("planner-1").plan.length, 3);
+
+  const failedAction = {
+    requestId: "blocked-chat",
+    agentId: "planner-1",
+    action: "chat_ai_private",
+    ok: false,
+    params: { message: "blocked" },
+    startedAt: new Date().toISOString(),
+    completedAt: new Date().toISOString(),
+    error: "no reachable teammate channel",
+    requestedBy: "llm",
+    source: "llm",
+  };
+  eventBus.emit("action.result", failedAction);
+  eventBus.emit("action.result", { ...failedAction, requestId: "blocked-chat-again" });
+  live.scheduler.queuePlanning("planner-1", { type: "manual" });
+  await live.scheduler.tick();
+  await live.scheduler.waitForIdle();
+  await live.scheduler.waitForIdle();
+
+  assert.equal(requests.filter((request) => request.schemaName === "AgentTaskPlan").length, 2);
+
+  await live.stop();
+});
+
+test("live runtime uses goal-advancing affordance instead of infeasible LLM action", async () => {
+  const agents = [agent("miner-1", "MinerOne", true)];
+  const registry = new AgentRegistry(agents);
+  const visibleStone = { x: 2, y: 64, z: 0 };
+  const dug: Position[] = [];
+  registry.attachBot("miner-1", miningBot("MinerOne", {
+    stonePosition: visibleStone,
+    onDig(position) {
+      dug.push(position);
+    },
+  }));
+
+  const eventBus = new StudioEventBus();
+  const providers = new LlmProviderRegistry();
+  const requests: LlmRequest[] = [];
+  providers.register({
+    name: "mock",
+    async generateStructured(request, schema) {
+      requests.push(request);
+      if (request.schemaName === "AgentTaskPlan") {
+        return { ok: true, value: schema.parse(planOutput("Need stone soon", "mine_block")) };
+      }
+      return {
+        ok: true,
+        value: schema.parse({
+          intent: "mine invented stone target",
+          action: "mine_block",
+          parameters: { position: { x: 40, y: 64, z: 0 }, block: "stone" },
+          confidence: 0.7,
+          reasoningSummary: "Trying a distant stone target.",
+        }),
+      };
+    },
+  });
+  const traces: GameEvent[] = [];
+  const results: ActionResult[] = [];
+  eventBus.subscribe("game.event", (event) => {
+    if (event.type === "decision.trace") traces.push(event);
+  });
+  eventBus.subscribe("action.result", (result) => results.push(result));
+
+  const live = createLiveAgentRuntime({
+    agents,
+    registry,
+    eventBus,
+    providers,
+    tickMs: 1_000,
+    maxConcurrentActions: 1,
+    maxPlanningSlots: 1,
+    planningCooldownMs: 0,
+  });
+
+  eventBus.emit("director.command", {
+    id: "stone-task",
+    type: "set-agent-task",
+    targetAgentId: "miner-1",
+    payload: { task: "Need stone soon" },
+    timestamp: new Date(0).toISOString(),
+  });
+
+  await live.scheduler.tick();
+  await live.scheduler.waitForIdle();
+  await live.scheduler.waitForIdle();
+
+  assert.equal(dug[0]?.x, visibleStone.x);
+  assert.equal(dug[0]?.y, visibleStone.y);
+  assert.equal(dug[0]?.z, visibleStone.z);
+  const mineResult = results.find((result) => result.action === "mine_block");
+  assert.equal(mineResult?.ok, true, mineResult?.error);
+  assert.equal(requests.filter((request) => request.schemaName === "AgentDecision").length, 1);
+  const rejectedTrace = traces.find((event) =>
+    event.payload.rejected === true && event.payload.action === "mine_block",
+  );
+  assert.equal(rejectedTrace?.payload.source, "llm_repair");
+  assert.match(String(rejectedTrace?.payload.reason ?? ""), /infeasible action rejected/);
+
+  await live.stop();
+});
+
+test("live runtime sends one repair prompt when no feasible alternative qualifies", async () => {
+  const agents = [agent("miner-1", "MinerOne", true)];
+  const registry = new AgentRegistry(agents);
+  let moves = 0;
+  registry.attachBot("miner-1", miningBot("MinerOne", {
+    pathfinder: {
+      async goto() {
+        moves += 1;
+      },
+      setGoal() {},
+    },
+  }));
+
+  const eventBus = new StudioEventBus();
+  const providers = new LlmProviderRegistry();
+  const requests: LlmRequest[] = [];
+  let decisionRequests = 0;
+  providers.register({
+    name: "mock",
+    async generateStructured(request, schema) {
+      requests.push(request);
+      if (request.schemaName === "AgentTaskPlan") {
+        return { ok: true, value: schema.parse(planOutput("Need stone soon", "mine_block")) };
+      }
+      decisionRequests += 1;
+      const value = decisionRequests === 1
+        ? {
+            intent: "mine invented stone target",
+            action: "mine_block",
+            parameters: { position: { x: 40, y: 64, z: 0 }, block: "stone" },
+            confidence: 0.7,
+            reasoningSummary: "Trying a distant stone target.",
+          }
+        : {
+            intent: "move to scout for stone",
+            action: "move_to",
+            parameters: { position: { x: 8, y: 64, z: 0 }, range: 2 },
+            confidence: 0.7,
+            reasoningSummary: "Repair by scouting instead of mining invisible stone.",
+          };
+      return { ok: true, value: schema.parse(value) };
+    },
+  });
+
+  const live = createLiveAgentRuntime({
+    agents,
+    registry,
+    eventBus,
+    providers,
+    tickMs: 1_000,
+    maxConcurrentActions: 1,
+    maxPlanningSlots: 1,
+    planningCooldownMs: 0,
+  });
+
+  eventBus.emit("director.command", {
+    id: "stone-task",
+    type: "set-agent-task",
+    targetAgentId: "miner-1",
+    payload: { task: "Need stone soon" },
+    timestamp: new Date(0).toISOString(),
+  });
+
+  await live.scheduler.tick();
+  await live.scheduler.waitForIdle();
+  await live.scheduler.waitForIdle();
+
+  const decisionCalls = requests.filter((request) => request.schemaName === "AgentDecision");
+  assert.equal(decisionCalls.length, 2);
+  assert.match(decisionCalls[1]?.messages.at(-1)?.content ?? "", /infeasible action/i);
+  assert.equal(moves, 1);
+
+  await live.stop();
+});
+
+test("live runtime respects configured allowedActions instead of auto-adding defaults", async () => {
+  const limitedAgent: AgentConfig = {
+    ...agent("guard-1", "GuardOne", true),
+    allowedActions: ["move_to", "chat_ai_private"],
+  };
+  const agents = [limitedAgent];
+  const registry = new AgentRegistry(agents);
+  let moves = 0;
+  registry.attachBot("guard-1", fakeBot({
+    username: "GuardOne",
+    health: 6,
+    entity: {
+      id: "guard-1",
+      type: "player",
+      username: "GuardOne",
+      position: { x: 0, y: 64, z: 0 },
+    },
+    entities: {
+      zombie: {
+        id: "zombie-1",
+        type: "mob",
+        name: "zombie",
+        position: { x: 5, y: 64, z: 0 },
+      },
+    },
+    pathfinder: {
+      async goto() {
+        moves += 1;
+      },
+      setGoal() {},
+    },
+  }));
+
+  const eventBus = new StudioEventBus();
+  const results: ActionResult[] = [];
+  eventBus.subscribe("action.result", (result) => results.push(result));
+  const providers = new LlmProviderRegistry();
+  const requests: LlmRequest[] = [];
+  providers.register({
+    name: "mock",
+    async generateStructured(request, schema) {
+      requests.push(request);
+      if (request.schemaName === "AgentTaskPlan") {
+        return { ok: true, value: schema.parse(planOutput("Move away from danger", "move_to")) };
+      }
+      return {
+        ok: true,
+        value: schema.parse({
+          intent: "move away from danger with allowed movement",
+          action: "move_to",
+          parameters: { position: { x: 1, y: 64, z: 0 }, range: 2 },
+          confidence: 0.75,
+          reasoningSummary: "Use an allowed movement action because flee is not configured.",
+        }),
+      };
+    },
+  });
+  const live = createLiveAgentRuntime({
+    agents,
+    registry,
+    eventBus,
+    providers,
+    tickMs: 1_000,
+    maxConcurrentActions: 1,
+    maxPlanningSlots: 1,
+    planningCooldownMs: 0,
+  });
+
+  eventBus.emit("game.event", {
+    id: "damage-1",
+    type: "player_damage",
+    targetId: "guard-1",
+    severity: 4,
+    visibility: "ai",
+    payload: {},
+    timestamp: new Date(0).toISOString(),
+  });
+
+  await live.scheduler.tick();
+  await live.scheduler.waitForIdle();
+  await live.scheduler.waitForIdle();
+
+  assert.equal(limitedAgent.allowedActions.includes("flee"), false);
+  assert.equal(moves, 1);
+  assert.ok(results.some((result) => result.ok && result.action === "move_to"));
+  assert.equal(results.some((result) => result.action === "flee"), false);
+  const prompt = requests.find((request) => request.schemaName === "AgentDecision")?.messages[0]?.content ?? "";
+  assert.match(prompt, /chat_ai_private:/);
+  assert.doesNotMatch(prompt, /flee:/);
+  assert.doesNotMatch(prompt, /attack_entity:/);
 
   await live.stop();
 });
@@ -514,4 +882,81 @@ function buildBot(username: string, position: Position): BotHandle {
     async equip() {},
     async placeBlock() {},
   });
+}
+
+function miningBot(
+  username: string,
+  options: {
+    stonePosition?: Position;
+    onDig?: (position: Position) => void;
+    pathfinder?: BotHandle["pathfinder"];
+  } = {},
+): BotHandle {
+  const position = { x: 0, y: 64, z: 0 };
+  return fakeBot({
+    username,
+    entity: {
+      id: username,
+      type: "player",
+      username,
+      position,
+    },
+    inventory: {
+      items: () => [],
+      emptySlotCount: () => 4,
+    },
+    blockAt(target) {
+      if (options.stonePosition && sameBlockPosition(target, options.stonePosition)) {
+        return { name: "stone", position: target, diggable: true };
+      }
+      return { name: "air", position: target, diggable: false };
+    },
+    canDigBlock() {
+      return true;
+    },
+    async dig(block) {
+      options.onDig?.(block.position);
+    },
+    pathfinder: options.pathfinder ?? {
+      async goto() {},
+      setGoal() {},
+    },
+  });
+}
+
+function planOutput(goal: string, nextAction: string) {
+  return {
+    goal,
+    currentStepId: "act",
+    steps: [
+      {
+        id: "act",
+        description: "Make concrete progress on the assigned task",
+        status: "active",
+        successCondition: "the next action makes progress",
+        nextAction,
+      },
+      {
+        id: "report",
+        description: "Report blockers or completion",
+        status: "pending",
+        successCondition: "leader knows the result",
+        nextAction: "chat_ai_private",
+      },
+      {
+        id: "continue",
+        description: "Continue useful work",
+        status: "pending",
+        successCondition: "task remains active",
+        nextAction,
+      },
+    ],
+    reasoningSummary: "Use the next concrete action.",
+  };
+}
+
+function sameBlockPosition(left: Position, right: Position): boolean {
+  return Math.floor(left.x) === Math.floor(right.x)
+    && Math.floor(left.y) === Math.floor(right.y)
+    && Math.floor(left.z) === Math.floor(right.z);
 }

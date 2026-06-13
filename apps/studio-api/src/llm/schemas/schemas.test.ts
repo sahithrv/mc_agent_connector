@@ -89,6 +89,27 @@ test("AgentDecision normalizes DeepSeek-style wrapped speech aliases", () => {
   assert.deepEqual(result.speech?.recipientIds, ["leader"]);
 });
 
+test("AgentDecision accepts optional planner skill fields without changing primitive action", () => {
+  const result = AgentDecisionSchema.parse({
+    goal: "Collect wood and prepare tools.",
+    skill: "gather_wood",
+    skill_params: { count: 3 },
+    intent: "start wood gathering",
+    action: "mine_block",
+    parameters: { position: { x: 1, y: 64, z: 0 }, block: "oak_log" },
+    expected_outcome: "Wood supply increases.",
+    recovery_if_fails: "Search nearby for another tree.",
+    confidence: 0.8,
+    reasoningSummary: "A wood gathering skill matches the multi-step task.",
+  });
+
+  assert.equal(result.skill, "gather_wood");
+  assert.deepEqual(result.skillParams, { count: 3 });
+  assert.equal(result.action, "mine_block");
+  assert.equal(result.expectedOutcome, "Wood supply increases.");
+  assert.equal(result.recoveryIfFails, "Search nearby for another tree.");
+});
+
 test("AgentDecision treats null speech as absent speech", () => {
   const result = AgentDecisionSchema.parse({
     intent: "ask for help",

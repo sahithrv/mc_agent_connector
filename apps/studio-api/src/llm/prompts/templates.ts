@@ -9,6 +9,7 @@ export const DEFAULT_DECISION_CONSTRAINTS = [
   "Do not change static identity, role, team, or core persona during a decision.",
   "Avoid unsafe mining, griefing, friendly fire, and attacks on players unless explicitly allowed by scenario constraints.",
   "Use RECENT_ACTION_RESULTS: do not repeat the same failed action-target pair unless the blocker has changed.",
+  "Prefer EXECUTABLE_NOW actions that advance the goal.",
   "If a recent action failed due to missing tool/material, choose an action that satisfies that precondition.",
   "Do not choose idle while any physical action or craftable precondition advances the active goal.",
   "If a target is not visible/reachable, choose a search/move/scout action or ask for help, not the same failing action.",
@@ -34,6 +35,7 @@ export function buildPersonaSystemPrompt(_persona: StaticPersona): string {
 export interface DecisionPromptInput {
   context: PromptContext;
   availableActions: string[];
+  availableSkills?: string[];
   constraints?: string[];
 }
 
@@ -44,6 +46,13 @@ export function buildDecisionPrompt(input: DecisionPromptInput): string {
     "",
     "AVAILABLE_ACTIONS",
     input.availableActions.join(", "),
+    input.availableSkills?.length
+      ? [
+          "",
+          "AVAILABLE_SKILLS",
+          input.availableSkills.join("\n"),
+        ].join("\n")
+      : undefined,
     "",
     "CONSTRAINTS",
     constraints.map((constraint) => `- ${constraint}`).join("\n"),
@@ -54,9 +63,53 @@ export function buildDecisionPrompt(input: DecisionPromptInput): string {
     "CONTEXT",
     input.context.contextText,
     "",
-    "Return AgentDecision JSON with fields: intent, action, parameters, optional speech, confidence, reasoningSummary.",
+    "Return AgentDecision JSON with fields: intent, action, parameters, optional goal, optional skill, optional skillParams, optional expectedOutcome, optional recoveryIfFails, optional speech, confidence, reasoningSummary.",
+    "Use skill only when one listed skill matches a multi-step goal. Skill selection is optional; action must still be one listed AVAILABLE_ACTIONS action.",
     "Speech is optional and should be short. Use visibility public or ai only.",
-  ].join("\n");
+  ].filter((line): line is string => line !== undefined).join("\n");
+}
+
+export interface PlanPromptInput {
+  context: PromptContext;
+  goal: string;
+  trigger: string;
+  availableActions: string[];
+  availableSkills?: string[];
+}
+
+export function buildAgentPlanPrompt(input: PlanPromptInput): string {
+  return [
+    "Create or update a compact working plan for this Minecraft agent.",
+    "The plan must be grounded in CURRENT_PLAN, PERCEPTION, inventory, EXECUTABLE_NOW, BLOCKED_USEFUL_ACTIONS, RECOVERY, and RECENT_ACTION_RESULTS.",
+    "",
+    `GOAL=${input.goal}`,
+    `PLAN_UPDATE_TRIGGER=${input.trigger}`,
+    "",
+    "AVAILABLE_ACTIONS",
+    input.availableActions.join(", "),
+    input.availableSkills?.length
+      ? [
+          "",
+          "AVAILABLE_SKILLS",
+          input.availableSkills.join("\n"),
+        ].join("\n")
+      : undefined,
+    "",
+    "PLAN_RULES",
+    "- Return 3 to 8 concise steps.",
+    "- Exactly one step should be active unless all useful work is done or blocked.",
+    "- Each step needs a concrete successCondition.",
+    "- Each unfinished step should include nextAction from AVAILABLE_ACTIONS or skill from AVAILABLE_SKILLS.",
+    "- Include neededItems or target only when known from inventory, perception, affordances, or recent failures.",
+    "- If RECOVERY or a blocked current step is present, revise the next step to satisfy the blocker or choose a different target/action.",
+    "- Do not invent distant targets, impossible inventory, or hidden world state.",
+    "",
+    "CONTEXT",
+    input.context.contextText,
+    "",
+    "Return AgentTaskPlan JSON with fields: goal, currentStepId, steps, optional reasoningSummary.",
+    "Each step has: id, description, status, successCondition, optional neededItems, optional target, optional blocker, optional nextAction, optional skill.",
+  ].filter((line): line is string => line !== undefined).join("\n");
 }
 
 export interface ReflectionPromptInput {

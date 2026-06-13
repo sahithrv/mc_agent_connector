@@ -3,7 +3,10 @@ import { randomUUID } from "node:crypto";
 import type { AgentBehaviorSettings, AgentConfig, JsonValue } from "@mc-ai-video/contracts";
 import type { FastifyInstance } from "fastify";
 
-import { DEFAULT_AGENT_ACTIONS, normalizeAgentActions } from "../agents/default-actions";
+import {
+  defaultAgentActionsForRole,
+  normalizeConfiguredAgentActions,
+} from "../agents/default-actions";
 import { AiChatService } from "../chat/service";
 import type { ClipMarkersRepository, EventsRepository } from "../db";
 import type { StudioEventBus } from "../events/bus";
@@ -324,9 +327,11 @@ function commandTypeForInjection(
 function agentConfigFromBody(body: unknown): AgentConfig {
   const source = objectBody(body);
   const account = objectBody(source.account, "account");
-  const allowedActions = normalizeAgentActions(
-    stringArrayValue(source.allowedActions) ?? [...DEFAULT_AGENT_ACTIONS],
-  );
+  const role = requiredString(source, "role", 128);
+  const configuredActions = stringArrayValue(source.allowedActions);
+  const allowedActions = configuredActions
+    ? normalizeConfiguredAgentActions(configuredActions)
+    : defaultAgentActionsForRole(role);
   return {
     id: requiredString(source, "id", 128),
     name: requiredString(source, "name", 128),
@@ -334,7 +339,7 @@ function agentConfigFromBody(body: unknown): AgentConfig {
       username: requiredString(account, "username", 16),
       auth: account.auth === "microsoft" ? "microsoft" : "offline",
     },
-    role: requiredString(source, "role", 128),
+    role,
     team: optionalString(source, "team", 128),
     subteam: optionalString(source, "subteam", 128),
     leader: booleanValue(source.leader),
@@ -370,7 +375,9 @@ function updateAgentConfigFromBody(
     personality: optionalString(source, "personality", 2_000) ?? current.personality,
     behavior: source.behavior === undefined ? current.behavior : behaviorValue(source.behavior),
     routine: optionalString(source, "routine", 128) ?? current.routine,
-    allowedActions: normalizeAgentActions(stringArrayValue(source.allowedActions) ?? current.allowedActions),
+    allowedActions: source.allowedActions === undefined
+      ? current.allowedActions
+      : normalizeConfiguredAgentActions(stringArrayValue(source.allowedActions) ?? []),
     providerRef: optionalString(source, "providerRef", 128) ?? current.providerRef,
   };
 

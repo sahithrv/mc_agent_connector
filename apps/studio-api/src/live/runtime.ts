@@ -13,7 +13,10 @@ import type {
 } from "@mc-ai-video/contracts";
 
 import type { AgentRegistry } from "../agents/registry";
-import { DEFAULT_AGENT_ACTIONS, normalizeAgentActions } from "../agents/default-actions";
+import {
+  defaultAgentActionsForRole,
+  normalizeConfiguredAgentActions,
+} from "../agents/default-actions";
 import { createDefaultActionRegistry } from "../actions";
 import { actionFailed } from "../actions/result";
 import type { ActionPolicy, AiChatPublishInput } from "../actions/types";
@@ -30,7 +33,12 @@ import {
 } from "../competitive";
 import { recipeKnowledgeMemories } from "../crafting/knowledge";
 import type { StudioEventBus } from "../events/bus";
-import { AgentDecisionService, type AgentDecisionServiceResult } from "../llm/decisions/service";
+import { AgentPlanService } from "../llm/decisions/plan-service";
+import {
+  AgentDecisionService,
+  type AgentDecisionServiceInput,
+  type AgentDecisionServiceResult,
+} from "../llm/decisions/service";
 import { canonicalMaterialName, isPlaceableMaterialName } from "../materials";
 import { allowedDecisionActionsForAgent } from "../llm/decisions/intent-map";
 import { createDefaultLlmProviderRegistry, type LlmProviderRegistry } from "../llm/providers";
@@ -42,6 +50,11 @@ import type {
   RoutineActionIntent,
 } from "../routines";
 import { defaultRoutines } from "../routines";
+import {
+  createDefaultSkillRegistry,
+  type SkillPlanResult,
+  type SkillRegistry,
+} from "../skills/registry";
 import { AgentScheduler } from "../scheduler/scheduler";
 import type {
   ActionRegistry as SchedulerActionRegistry,
@@ -51,6 +64,12 @@ import type {
   WakeReason,
 } from "../scheduler/types";
 import { ActionHistoryStore } from "./action-history";
+import { targetKeyForAction } from "./action-target-key";
+import { buildAffordances, type ActionAffordance } from "./affordances";
+import {
+  validateIntentFeasibility,
+  type FeasibilityResult,
+} from "./action-feasibility";
 import {
   createDecisionTrace,
   emitDecisionTrace,
@@ -58,7 +77,21 @@ import {
   withDecisionTrace,
   type DecisionSource,
 } from "./decision-trace";
+import { analyzeStuck, type StuckAnalysis } from "./stuck-detector";
+import {
+  actionProgressDeltaFromResult,
+  applyActionProgressDelta,
+  createProgressSnapshot,
+  emptyActionProgressCounters,
+  extractProgressSignal,
+  progressSignalData,
+  progressSignature,
+  type ActionProgressCounters,
+  type ProgressSignal,
+  type ProgressSnapshot,
+} from "./progress";
 import { SubteamDirectory, jsonRecipientRequest } from "./subteams";
+import { AgentTaskStateStore } from "./task-state";
 import { TeamMemoryStore, teamMemoryPromptMemories } from "./team-memory";
 import { TeamGoalController } from "./team-goal-controller";
 
@@ -76,6 +109,7 @@ export interface LiveAgentRuntimeOptions {
   maxConcurrentActions: number;
   maxPlanningSlots: number;
   planningCooldownMs: number;
+  providers?: LlmProviderRegistry;
   connectAgent?: (agent: AgentConfig) => Promise<void>;
 }
 
@@ -85,6 +119,7 @@ export interface LiveAgentRuntime {
   scheduler: AgentScheduler;
   competitive: LiveCompetitiveRuntime;
   actionHistory: ActionHistoryStore;
+  taskState: AgentTaskStateStore;
 }
 
 export interface LiveCompetitiveRuntime {
@@ -93,35 +128,57 @@ export interface LiveCompetitiveRuntime {
 }
 
 export function createLiveAgentRuntime(options: LiveAgentRuntimeOptions): LiveAgentRuntime {
-  const subteams = new SubteamDirectory(options.agents);
-  const context = new LiveContext(subteams, options.agents);
+  const actionPreferences = new Map(
+    options.agents.map((agent) => [agent.id, normalizeConfiguredAgentActions(agent.allowedActions)]),
+  );
+  const agents = options.agents.map(liveRuntimeAgent);
+  const subteams = new SubteamDirectory(agents);
+  const context = new LiveContext(subteams, agents);
   const teamMemory = new TeamMemoryStore({ subteams });
   const actionHistory = new ActionHistoryStore();
+  const taskState = new AgentTaskStateStore();
   const coordination = new RuntimeCoordinationMessages(options.eventBus, subteams);
-  const llmProviders = createDefaultLlmProviderRegistry();
+  const llmProviders = options.providers ?? createDefaultLlmProviderRegistry();
   const competitive = new CompetitiveLiveCoordinator({
-    agents: options.agents,
+    agents,
     subteams,
     registry: options.registry,
     providers: llmProviders,
   });
+  const skills = createDefaultSkillRegistry();
   const teamGoals = new TeamGoalController({
     subteams,
     getBot: (agentId) => options.registry.getBot(agentId),
     roleForAgent: (agentId) => context.roleForAgent(agentId),
     memory: teamMemory,
   });
+  const actionProgressCounters = new Map<string, ActionProgressCounters>();
+  const progressSnapshots = new Map<string, ProgressSnapshot>();
+  const progressSnapshotForAgent = (agentId: string, perception?: RoutinePerceptionSnapshot): ProgressSnapshot =>
+    createProgressSnapshot({
+      bot: options.registry.getBot(agentId),
+      perception,
+      teamGoal: teamGoalSnapshotForAgent(subteams, teamGoals, agentId),
+      actionCounts: actionProgressCounters.get(agentId) ?? emptyActionProgressCounters(),
+    });
   const routines = defaultRoutines();
   const actions = new LiveSchedulerActions(
     createDefaultActionRegistry(),
     options.registry,
     options.eventBus,
-    options.agents,
+    agents,
   );
   const scheduler = new AgentScheduler({
-    agents: options.agents,
+    agents,
     routines,
-    perception: new LivePerceptionProvider(options.registry, context, teamMemory),
+    perception: new LivePerceptionProvider(
+      options.registry,
+      context,
+      teamMemory,
+      (agentId, perception) => {
+        progressSnapshots.set(agentId, progressSnapshotForAgent(agentId, perception));
+      },
+    ),
     actions,
     planner: new LiveDecisionPlanner(
       options.registry,
@@ -130,12 +187,15 @@ export function createLiveAgentRuntime(options: LiveAgentRuntimeOptions): LiveAg
       routines,
       teamGoals,
       teamMemory,
-      options.agents,
+      agents,
       llmProviders,
       competitive,
       coordination,
       options.eventBus,
       actionHistory,
+      taskState,
+      actionPreferences,
+      skills,
     ),
     events: {
       publish(event) {
@@ -157,17 +217,27 @@ export function createLiveAgentRuntime(options: LiveAgentRuntimeOptions): LiveAg
   const unsubscribers = [
     options.eventBus.subscribe("game.event", (event) => {
       context.addEvent(event);
-      const chat = chatFromGameEvent(event, options.agents);
+      const chat = chatFromGameEvent(event, agents);
       if (chat) {
         context.addChat(chat);
       }
       const briefingTask = briefingTaskFromDirectorEvent(event);
       if (briefingTask) {
         for (const subteamId of subteamIdsForDirectorEvent(event, subteams)) {
+          resetTaskStateForAgents(taskState, context.agentIdsForSubteam(subteamId), briefingTask);
           emitSubteamBriefing(subteamId, briefingTask, "leader-briefing");
         }
+      } else {
+        const directorTask = taskGoalFromDirectorEvent(event);
+        if (directorTask) {
+          resetTaskStateForAgents(
+            taskState,
+            subteamIdsForDirectorEvent(event, subteams).flatMap((subteamId) => context.agentIdsForSubteam(subteamId)),
+            directorTask,
+          );
+        }
       }
-      for (const wakeEvent of wakeEventsFromGameEvent(event, options.agents)) {
+      for (const wakeEvent of wakeEventsFromGameEvent(event, agents)) {
         scheduler.handleEvent(wakeEvent);
       }
     }),
@@ -177,6 +247,7 @@ export function createLiveAgentRuntime(options: LiveAgentRuntimeOptions): LiveAg
       if (briefingTask) {
         for (const subteamId of subteamIdsForChatMessage(message, subteams)) {
           context.setSubteamTask(subteamId, briefingTask);
+          resetTaskStateForAgents(taskState, context.agentIdsForSubteam(subteamId), briefingTask);
           emitSubteamBriefing(subteamId, briefingTask, "leader-briefing");
           for (const agentId of context.agentIdsForSubteam(subteamId)) {
             scheduler.queuePlanning(agentId, { type: "direct_mention" });
@@ -188,16 +259,34 @@ export function createLiveAgentRuntime(options: LiveAgentRuntimeOptions): LiveAg
       }
     }),
     options.eventBus.subscribe("action.result", (result) => {
-      actionHistory.record(result);
-      teamGoals.recordActionResult(result);
-      competitive.recordActionResult(result);
-      if (!result.ok) {
-        coordination.blocked(result.agentId, result.error ?? `${result.action} failed`);
-      } else if (context.hasActiveGoal(result.agentId)) {
-        coordination.completed(result.agentId, result.action);
+      const beforeProgress = progressSnapshots.get(result.agentId);
+      const currentCounters = actionProgressCounters.get(result.agentId) ?? emptyActionProgressCounters();
+      actionProgressCounters.set(
+        result.agentId,
+        applyActionProgressDelta(currentCounters, actionProgressDeltaFromResult(result)),
+      );
+
+      const preliminaryResult = withProgressSignal(
+        result,
+        extractProgressSignal(beforeProgress, progressSnapshotForAgent(result.agentId)),
+      );
+      teamGoals.recordActionResult(preliminaryResult);
+
+      const afterProgress = progressSnapshotForAgent(result.agentId);
+      const enrichedResult = withProgressSignal(result, extractProgressSignal(beforeProgress, afterProgress));
+      progressSnapshots.set(result.agentId, afterProgress);
+
+      actionHistory.record(enrichedResult);
+      skills.recordActionResult(enrichedResult);
+      competitive.recordActionResult(enrichedResult);
+      taskState.recordActionResult(enrichedResult);
+      if (!enrichedResult.ok) {
+        coordination.blocked(enrichedResult.agentId, enrichedResult.error ?? `${enrichedResult.action} failed`);
+      } else if (context.hasActiveGoal(enrichedResult.agentId)) {
+        coordination.completed(enrichedResult.agentId, enrichedResult.action);
       }
-      if (context.hasActiveGoal(result.agentId)) {
-        scheduler.queuePlanning(result.agentId, { type: "manual" });
+      if (context.hasActiveGoal(enrichedResult.agentId) || skills.hasActive(enrichedResult.agentId)) {
+        scheduler.queuePlanning(enrichedResult.agentId, { type: "manual" });
       }
     }),
     options.eventBus.subscribe("director.command", (command) => {
@@ -213,23 +302,27 @@ export function createLiveAgentRuntime(options: LiveAgentRuntimeOptions): LiveAg
         context.setAgentRole(command.targetAgentId, stringPayload(command.payload.role) ?? stringPayload(command.payload.text) ?? "");
         scheduler.queuePlanning(command.targetAgentId, { type: "manual" });
       } else if (command.type === "set-agent-task" && command.targetAgentId) {
+        const task = stringPayload(command.payload.task) ?? stringPayload(command.payload.text) ?? "";
         context.setAgentTask(
           command.targetAgentId,
-          stringPayload(command.payload.task) ?? stringPayload(command.payload.text) ?? "",
+          task,
           stringPayload(command.payload.taskId),
         );
+        taskState.setGoal(command.targetAgentId, task);
         scheduler.queuePlanning(command.targetAgentId, { type: "manual" });
       } else if (command.type === "set-subteam-task") {
         const subteamId = stringPayload(command.payload.subteamId);
         if (subteamId) {
+          const task = stringPayload(command.payload.task) ?? stringPayload(command.payload.text) ?? "";
           context.setSubteamTask(
             subteamId,
-            stringPayload(command.payload.task) ?? stringPayload(command.payload.text) ?? "",
+            task,
             stringPayload(command.payload.taskId),
           );
+          resetTaskStateForAgents(taskState, context.agentIdsForSubteam(subteamId), task);
           emitSubteamBriefing(
             subteamId,
-            stringPayload(command.payload.task) ?? stringPayload(command.payload.text) ?? "",
+            task,
             "subteam-task",
           );
           for (const agentId of context.agentIdsForSubteam(subteamId)) {
@@ -263,6 +356,8 @@ export function createLiveAgentRuntime(options: LiveAgentRuntimeOptions): LiveAg
         const agent = agentConfigFromPayload(command.payload.agent);
         if (agent) {
           addRuntimeAgent(agent, {
+            agents,
+            actionPreferences,
             registry: options.registry,
             scheduler,
             context,
@@ -283,6 +378,7 @@ export function createLiveAgentRuntime(options: LiveAgentRuntimeOptions): LiveAg
     scheduler,
     competitive,
     actionHistory,
+    taskState,
     start() {
       if (interval) return;
       interval = setInterval(() => {
@@ -573,6 +669,7 @@ class LivePerceptionProvider implements PerceptionProvider {
     private readonly registry: AgentRegistry,
     private readonly context: LiveContext,
     private readonly teamMemory: TeamMemoryStore,
+    private readonly onSnapshot?: (agentId: string, snapshot: RoutinePerceptionSnapshot) => void,
   ) {}
 
   async snapshot(agent: AgentConfig): Promise<RoutinePerceptionSnapshot> {
@@ -581,6 +678,7 @@ class LivePerceptionProvider implements PerceptionProvider {
       ? routinePerceptionFromBot(agent.id, bot, this.context.eventsForAgent(agent.id), this.context.attackTargetUsername(), this.context.agentUsernames())
       : emptyRoutinePerception(agent.id);
     this.teamMemory.recordPerception(agent.id, snapshot, bot?.inventory?.items());
+    this.onSnapshot?.(agent.id, snapshot);
     return snapshot;
   }
 }
@@ -840,7 +938,9 @@ class CompetitiveLiveCoordinator implements LiveCompetitiveRuntime {
 
 class LiveDecisionPlanner implements DecisionPlanner {
   private readonly decisions: AgentDecisionService;
+  private readonly plans: AgentPlanService;
   private readonly scoutTargets = new Map<string, Position>();
+  private readonly lastPlanUpdateKeys = new Map<string, string>();
 
   constructor(
     private readonly registry: AgentRegistry,
@@ -855,8 +955,12 @@ class LiveDecisionPlanner implements DecisionPlanner {
     private readonly coordination: RuntimeCoordinationMessages,
     private readonly eventBus: StudioEventBus,
     private readonly actionHistory: ActionHistoryStore,
+    private readonly taskState: AgentTaskStateStore,
+    private readonly actionPreferences: Map<string, string[]>,
+    private readonly skills: SkillRegistry,
   ) {
     this.decisions = new AgentDecisionService(providers);
+    this.plans = new AgentPlanService(providers);
   }
 
   async plan(
@@ -880,6 +984,7 @@ class LiveDecisionPlanner implements DecisionPlanner {
       : undefined;
     const currentTask = eventTask ?? assignedTask ?? activeGoal;
     const objectiveTask = assignedTask ?? activeGoal ?? currentTask;
+    this.taskState.setGoal(agent.id, objectiveTask);
     const competitiveGoal = this.context.objectiveCandidatesForAgent(agent.id).find(isCompetitiveObjective) ?? objectiveTask;
     const fallbackNotes: string[] = [];
     const survivalIntent = this.survivalThreatIntent(agent, perception);
@@ -937,6 +1042,22 @@ class LiveDecisionPlanner implements DecisionPlanner {
       fallbackNotes.push(competitiveIntent.note);
     }
 
+    const activeSkill = this.continueActiveSkill(agent, perception, bot);
+    if (activeSkill?.action) {
+      console.log(`[live-plan] ${agent.id} ${activeSkill.action.action}: continuing skill ${activeSkill.skill}`);
+      return this.tracedPlan({
+        agent,
+        source: "skill",
+        action: activeSkill.action,
+        reason: activeSkill.reason ?? `continuing skill ${activeSkill.skill}`,
+        note: skillPlanNote(activeSkill),
+        fallback: false,
+      });
+    }
+    if (activeSkill?.done || activeSkill?.failed) {
+      fallbackNotes.push(skillPlanNote(activeSkill));
+    }
+
     const teamIntent = this.teamGoals.plan({
       agent,
       perception,
@@ -960,90 +1081,271 @@ class LiveDecisionPlanner implements DecisionPlanner {
       console.log(`[live-plan] ${agent.id} fallback: ${teamIntent.note}; trying LLM decision`);
     }
 
-    const result = await this.decisions.decide({
+    const recentActionResults = this.actionHistory.recentForAgent(agent.id, 8);
+    const currentProgress = createProgressSnapshot({
+      bot,
+      perception,
+      teamGoal: teamGoalSnapshotForAgent(this.subteams, this.teamGoals, agent.id),
+    });
+    const stuckAnalysis = analyzeStuck(agent.id, recentActionResults, {
+      activeGoal: objectiveTask,
+      position: toPosition(bot?.entity?.position),
+      inventory: inventoryForStuckAnalysis(bot, perception),
+      progress: progressSignature(currentProgress),
+    });
+    if (stuckAnalysis.stuck) {
+      fallbackNotes.push(`recovery: ${stuckAnalysis.reason ?? "stuck"}`);
+      console.log(`[live-plan] ${agent.id} recovery: ${stuckAnalysis.reason ?? "stuck"}`);
+    }
+    const affordances = applyStuckAnalysisToAffordances(buildAffordances({
       agent,
-      model: {
-        provider: agent.providerRef || "deepseek",
-        model: process.env.DEEPSEEK_MODEL ?? DEFAULT_MODEL,
-        timeoutMs: readIntegerEnv("LIVE_AGENT_LLM_TIMEOUT_MS", 12_000),
-        temperature: 0.35,
+      bot,
+      perception,
+      goal: objectiveTask,
+      recentFailures: recentActionResults,
+    }), stuckAnalysis);
+
+    const model = {
+      provider: agent.providerRef || "deepseek",
+      model: process.env.DEEPSEEK_MODEL ?? DEFAULT_MODEL,
+      timeoutMs: readIntegerEnv("LIVE_AGENT_LLM_TIMEOUT_MS", 12_000),
+      temperature: 0.35,
+    };
+    const staticPersona = personaForAgent(agent, this.context.roleForAgent(agent.id));
+    const dynamicState = {
+      mode: this.registry.get(agent.id)?.mode,
+      health: bot?.health ?? perception.health,
+      food: bot?.food,
+      position: toPosition(bot?.entity?.position),
+      activeGoal,
+      currentRoutine: agent.routine,
+      currentTask,
+      threatLevel: threatLevel(perception),
+    };
+    const promptSnapshot = promptPerception(botPerception, perception);
+    const memories = [
+      {
+        id: "subteam-roster",
+        summary: `Subteams and leaders: ${this.subteams.describeForAgent(agent.id)}`,
+        importance: 5,
       },
-      staticPersona: personaForAgent(agent, this.context.roleForAgent(agent.id)),
-      dynamicState: {
-        mode: this.registry.get(agent.id)?.mode,
-        health: bot?.health ?? perception.health,
-        food: bot?.food,
-        position: toPosition(bot?.entity?.position),
-        activeGoal,
-        currentRoutine: agent.routine,
-        currentTask,
-        threatLevel: threatLevel(perception),
+      {
+        id: "leader-username",
+        summary: agent.leader
+          ? `You are the subteam leader; scout with move_to and do not follow yourself.`
+          : `Your leader Minecraft username is ${this.subteams.leaderUsernameForAgent(agent.id) ?? "unknown"}.`,
+        importance: 5,
       },
-      perception: promptPerception(botPerception, perception),
+      {
+        id: "subteam-goal",
+        summary: `Your subteam goal: ${this.context.teamGoal(agent.id) ?? "no active goal"}`,
+        importance: 5,
+      },
+      roleActionPreferenceMemory(agent, this.actionPreferences.get(agent.id)),
+      ...stuckRecoveryMemories(stuckAnalysis),
+      ...teamMemoryPromptMemories(this.teamMemory, agent.id),
+      ...this.context.directorNotes(agent.id).map((summary, index) => ({
+        id: `director-context-${index}`,
+        summary,
+        importance: 5 as const,
+      })),
+      ...recipeKnowledgeMemories({
+        goal: activeGoal,
+        task: currentTask,
+        role: agent.role,
+        inventoryItemNames: bot?.inventory?.items().map((item) => item.name),
+        version: bot?.version,
+      }),
+    ];
+    const availableActions = availableLiveActions(agent, bot);
+    const availableSkills = this.skills.promptDescriptions();
+    const constraints = [
+      "Respond to director AI chat as a task assignment unless it is clearly casual.",
+      "Coordinate first with your subteam. Your private team chat is chat_ai_private without explicit recipients.",
+      "To communicate with another subteam, use chat_ai_private with subteamId set to that subteam id or leadersOnly=true for leaders.",
+      "If you are a subteam leader, assign work to your own members using chat_ai_private.",
+      "Use recent team memory for routine coordination before chat; do not chat routine following or status updates.",
+      "If you are a subteam leader, do not use follow_player on yourself; use move_to to scout a nearby build site.",
+      "If you are not the leader and the task says follow your leader, use follow_player targeting your leader username.",
+      "For task assignments, prefer a physical action or continue_routine over chat.",
+      "Use chat only to report completion, warn about danger, or ask a necessary clarifying question.",
+      "Use continue_routine for role work when no exact movement or block target is known.",
+      "If you need a tool or block and have ingredients, use craft_item before mining, building, or fighting.",
+      "Use the crafting recipe and creative build guidance memories as hints, not rigid scripts.",
+      "If choosing move_to, provide a nearby reachable position using x, y, z or position.",
+      "For village-building tasks, use mine_block, collect_item, craft_item, move_to, and place_block when the needed target is visible or craftable.",
+      "For attack tasks, use follow_player first if the target player is visible but not in range.",
+      "Only attack a real player when the director goal explicitly says kill or attack that username.",
+      "Use RECENT_ACTION_RESULTS: do not repeat the same failed action-target pair unless the blocker has changed.",
+      "Use CURRENT_PLAN: advance the active step, satisfy its blocker, or revise away from it when blocked.",
+      "Prefer EXECUTABLE_NOW actions that advance the goal.",
+      "If a recent action failed due to missing tool/material, choose an action that satisfies that precondition.",
+      "Do not choose idle while any physical action or craftable precondition advances the active goal.",
+      "If a target is not visible/reachable, choose a search/move/scout action or ask for help, not the same failing action.",
+      ...stuckRecoveryConstraints(stuckAnalysis),
+    ];
+
+    let taskPromptState = this.taskState.toPromptState(agent.id);
+    const planTrigger = this.planUpdateTrigger(agent.id, objectiveTask, stuckAnalysis);
+    if (
+      objectiveTask
+      && planTrigger
+      && this.shouldRequestPlanUpdate(agent.id, objectiveTask, planTrigger, stuckAnalysis)
+    ) {
+      const planResult = await this.plans.updatePlan({
+        agent,
+        model,
+        goal: objectiveTask,
+        trigger: planTrigger,
+        staticPersona,
+        dynamicState,
+        perception: promptSnapshot,
+        recentChat: this.context.chatForAgent(agent.id),
+        recentEvents: this.context.eventsForAgent(agent.id),
+        memories,
+        recentActionResults,
+        affordances,
+        recovery: promptRecoveryContext(stuckAnalysis),
+        taskState: taskPromptState,
+        availableActions,
+        availableSkills,
+        maxContextChars: 4_000,
+      });
+      this.taskState.setPlan({
+        agentId: agent.id,
+        goal: planResult.plan.goal ?? objectiveTask,
+        steps: planResult.plan.steps,
+        currentStepId: planResult.plan.currentStepId,
+      });
+      this.taskState.markPlanUpdated(agent.id);
+      taskPromptState = this.taskState.toPromptState(agent.id);
+      fallbackNotes.push(
+        `${planResult.fallback ? "fallback plan" : "plan updated"}: ${planResult.plan.reasoningSummary ?? planTrigger}`,
+      );
+      if (planResult.fallback) {
+        console.warn(`[live-plan] ${agent.id} fallback task plan: ${planResult.fallbackReason ?? "unknown"}`);
+      }
+    }
+
+    const decisionInput: AgentDecisionServiceInput = {
+      agent,
+      model,
+      staticPersona,
+      dynamicState,
+      perception: promptSnapshot,
       recentChat: this.context.chatForAgent(agent.id),
       recentEvents: this.context.eventsForAgent(agent.id),
-      memories: [
-        {
-          id: "subteam-roster",
-          summary: `Subteams and leaders: ${this.subteams.describeForAgent(agent.id)}`,
-          importance: 5,
-        },
-        {
-          id: "leader-username",
-          summary: agent.leader
-            ? `You are the subteam leader; scout with move_to and do not follow yourself.`
-            : `Your leader Minecraft username is ${this.subteams.leaderUsernameForAgent(agent.id) ?? "unknown"}.`,
-          importance: 5,
-        },
-        {
-          id: "subteam-goal",
-          summary: `Your subteam goal: ${this.context.teamGoal(agent.id) ?? "no active goal"}`,
-          importance: 5,
-        },
-        ...teamMemoryPromptMemories(this.teamMemory, agent.id),
-        ...this.context.directorNotes(agent.id).map((summary, index) => ({
-          id: `director-context-${index}`,
-          summary,
-          importance: 5 as const,
-        })),
-        ...recipeKnowledgeMemories({
-          goal: activeGoal,
-          task: currentTask,
-          role: agent.role,
-          inventoryItemNames: bot?.inventory?.items().map((item) => item.name),
-          version: bot?.version,
-        }),
-      ],
-      recentActionResults: this.actionHistory.recentForAgent(agent.id, 8),
-      availableActions: availableLiveActions(agent, bot),
-      constraints: [
-        "Respond to director AI chat as a task assignment unless it is clearly casual.",
-        "Coordinate first with your subteam. Your private team chat is chat_ai_private without explicit recipients.",
-        "To communicate with another subteam, use chat_ai_private with subteamId set to that subteam id or leadersOnly=true for leaders.",
-        "If you are a subteam leader, assign work to your own members using chat_ai_private.",
-        "Use recent team memory for routine coordination before chat; do not chat routine following or status updates.",
-        "If you are a subteam leader, do not use follow_player on yourself; use move_to to scout a nearby build site.",
-        "If you are not the leader and the task says follow your leader, use follow_player targeting your leader username.",
-        "For task assignments, prefer a physical action or continue_routine over chat.",
-        "Use chat only to report completion, warn about danger, or ask a necessary clarifying question.",
-        "Use continue_routine for role work when no exact movement or block target is known.",
-        "If you need a tool or block and have ingredients, use craft_item before mining, building, or fighting.",
-        "Use the crafting recipe and creative build guidance memories as hints, not rigid scripts.",
-        "If choosing move_to, provide a nearby reachable position using x, y, z or position.",
-        "For village-building tasks, use mine_block, collect_item, craft_item, move_to, and place_block when the needed target is visible or craftable.",
-        "For attack tasks, use follow_player first if the target player is visible but not in range.",
-        "Only attack a real player when the director goal explicitly says kill or attack that username.",
-        "Use RECENT_ACTION_RESULTS: do not repeat the same failed action-target pair unless the blocker has changed.",
-        "If a recent action failed due to missing tool/material, choose an action that satisfies that precondition.",
-        "Do not choose idle while any physical action or craftable precondition advances the active goal.",
-        "If a target is not visible/reachable, choose a search/move/scout action or ask for help, not the same failing action.",
-      ],
+      memories,
+      recentActionResults,
+      affordances,
+      recovery: promptRecoveryContext(stuckAnalysis),
+      taskState: taskPromptState,
+      availableActions,
+      availableSkills,
+      constraints,
       maxContextChars: 4_000,
-    });
+    };
 
+    let result = await this.decisions.decide(decisionInput);
     logLlmDecisionTrace(agent, result);
 
-    const intent = this.decisionToIntent(agent, perception, result.decision);
+    let sourceOverride: DecisionSource | undefined;
+    let feasibilityRejected = false;
+    let feasibilityReason: string | undefined;
+    let skillPlan = this.skillFromDecision(agent, perception, bot, result.decision, objectiveTask);
+    if (skillPlan?.failed || skillPlan?.done) {
+      fallbackNotes.push(skillPlanNote(skillPlan));
+    }
+    let intent = skillPlan?.action ?? this.decisionToIntent(agent, perception, result.decision);
+    const feasibility = this.validateLlmIntent({
+      agent,
+      bot,
+      perception,
+      intent,
+      affordances,
+      blockedTargetKeys: stuckAnalysis.blockedTargetKeys,
+    });
+    if (!feasibility.ok) {
+      feasibilityRejected = true;
+      feasibilityReason = feasibility.reason;
+      fallbackNotes.push(`rejected infeasible action: ${feasibility.reason}`);
+      console.warn(`[live-plan] ${agent.id} rejected infeasible ${intent?.action ?? result.decision.action}: ${feasibility.reason}`);
+
+      const alternative = feasibility.alternatives[0];
+      if (alternative) {
+        intent = alternative;
+        skillPlan = undefined;
+        sourceOverride = "llm_repair";
+        fallbackNotes.push(`using affordance alternative: ${alternative.action}`);
+      } else {
+        const repaired = await this.decisions.repairRejectedDecision({
+          input: decisionInput,
+          previousDecision: result.decision,
+          reason: `infeasible action: ${feasibility.reason}`,
+        });
+        if (repaired) {
+          logLlmDecisionTrace(agent, repaired);
+          const repairedPlan = this.intentFromDecisionResult({
+            agent,
+            perception,
+            bot,
+            result: repaired,
+            objectiveTask,
+          });
+          const repairedFeasibility = this.validateLlmIntent({
+            agent,
+            bot,
+            perception,
+            intent: repairedPlan.intent,
+            affordances,
+            blockedTargetKeys: stuckAnalysis.blockedTargetKeys,
+          });
+          if (repairedFeasibility.ok) {
+            result = repaired;
+            skillPlan = repairedPlan.skillPlan;
+            intent = repairedPlan.intent;
+            sourceOverride = "llm_repair";
+            fallbackNotes.push(`repaired infeasible action: ${result.decision.action}`);
+            if (skillPlan?.failed || skillPlan?.done) {
+              fallbackNotes.push(skillPlanNote(skillPlan));
+            }
+          } else {
+            feasibilityReason = `${feasibility.reason}; repair also infeasible: ${repairedFeasibility.reason}`;
+            const fallbackPlan = this.fallbackAfterInfeasibleDecision({
+              agent,
+              perception,
+              bot,
+              decisionInput,
+              reason: feasibilityReason,
+              affordances,
+              blockedTargetKeys: stuckAnalysis.blockedTargetKeys,
+              objectiveTask,
+            });
+            result = fallbackPlan.result;
+            skillPlan = fallbackPlan.skillPlan;
+            intent = fallbackPlan.intent;
+            sourceOverride = "fallback";
+            fallbackNotes.push(fallbackPlan.note);
+          }
+        } else {
+          const fallbackPlan = this.fallbackAfterInfeasibleDecision({
+            agent,
+            perception,
+            bot,
+            decisionInput,
+            reason: feasibility.reason,
+            affordances,
+            blockedTargetKeys: stuckAnalysis.blockedTargetKeys,
+            objectiveTask,
+          });
+          result = fallbackPlan.result;
+          skillPlan = fallbackPlan.skillPlan;
+          intent = fallbackPlan.intent;
+          sourceOverride = "fallback";
+          fallbackNotes.push(fallbackPlan.note);
+        }
+      }
+    }
     const fallbackReason = result.fallbackReason ? ` reason=${result.fallbackReason}` : "";
     const usage = formatLlmUsage(result.usage);
     if (result.fallback) {
@@ -1054,18 +1356,217 @@ class LiveDecisionPlanner implements DecisionPlanner {
         + `${result.fallback ? ` fallback${fallbackReason}` : ""}: ${result.decision.reasoningSummary}`
         + `${usage ? ` ${usage}` : ""}`,
     );
-    const llmSource: DecisionSource = result.fallback
+    const llmSource: DecisionSource = skillPlan?.action
+      ? "skill"
+      : sourceOverride
+      ? sourceOverride
+      : stuckAnalysis.stuck
+      ? "stuck_recovery"
+      : result.fallback
       ? result.rejection ? "llm_repair" : "fallback"
       : "llm";
+    const traceReason = feasibilityReason
+      ? `infeasible action rejected: ${feasibilityReason}; ${skillPlan?.reason ?? result.fallbackReason ?? result.decision.reasoningSummary}`
+      : skillPlan?.reason ?? result.fallbackReason ?? result.decision.reasoningSummary;
     return this.tracedPlan({
       agent,
       source: llmSource,
       action: intent,
-      reason: result.fallbackReason ?? result.decision.reasoningSummary,
-      note: [...fallbackNotes, result.decision.reasoningSummary].join(" | "),
+      reason: traceReason,
+      note: [...fallbackNotes, skillPlan?.action ? skillPlanNote(skillPlan) : undefined, result.decision.reasoningSummary]
+        .filter((note): note is string => Boolean(note))
+        .join(" | "),
       fallback: result.fallback,
-      rejected: Boolean(result.rejection),
+      rejected: Boolean(result.rejection) || feasibilityRejected,
     });
+  }
+
+  private continueActiveSkill(
+    agent: AgentConfig,
+    perception: RoutinePerceptionSnapshot,
+    bot: BotHandle | undefined,
+  ): SkillPlanResult | undefined {
+    return this.skills.planActive(this.skillInput(agent, perception, bot));
+  }
+
+  private skillFromDecision(
+    agent: AgentConfig,
+    perception: RoutinePerceptionSnapshot,
+    bot: BotHandle | undefined,
+    decision: AgentDecision,
+    objectiveTask: string | undefined,
+  ): SkillPlanResult | undefined {
+    if (!decision.skill) {
+      return undefined;
+    }
+    const request = this.skills.request({
+      agentId: agent.id,
+      skill: decision.skill,
+      params: jsonParams(decision.skillParams ?? {}),
+      goal: decision.goal ?? objectiveTask,
+    });
+    return this.skills.planNext({
+      ...this.skillInput(agent, perception, bot),
+      request,
+    });
+  }
+
+  private intentFromDecisionResult(input: {
+    agent: AgentConfig;
+    perception: RoutinePerceptionSnapshot;
+    bot: BotHandle | undefined;
+    result: AgentDecisionServiceResult;
+    objectiveTask: string | undefined;
+  }): { skillPlan?: SkillPlanResult; intent?: RoutineActionIntent } {
+    const skillPlan = this.skillFromDecision(
+      input.agent,
+      input.perception,
+      input.bot,
+      input.result.decision,
+      input.objectiveTask,
+    );
+    return {
+      skillPlan,
+      intent: skillPlan?.action ?? this.decisionToIntent(input.agent, input.perception, input.result.decision),
+    };
+  }
+
+  private validateLlmIntent(input: {
+    agent: AgentConfig;
+    bot: BotHandle | undefined;
+    perception: RoutinePerceptionSnapshot;
+    intent?: RoutineActionIntent;
+    affordances: ActionAffordance[];
+    blockedTargetKeys: string[];
+  }): FeasibilityResult {
+    if (!input.intent) {
+      return { ok: true };
+    }
+    return validateIntentFeasibility({
+      agent: input.agent,
+      bot: input.bot,
+      perception: input.perception,
+      intent: input.intent,
+      affordances: input.affordances,
+      blockedTargetKeys: input.blockedTargetKeys,
+    });
+  }
+
+  private fallbackAfterInfeasibleDecision(input: {
+    agent: AgentConfig;
+    perception: RoutinePerceptionSnapshot;
+    bot: BotHandle | undefined;
+    decisionInput: AgentDecisionServiceInput;
+    reason: string;
+    affordances: ActionAffordance[];
+    blockedTargetKeys: string[];
+    objectiveTask: string | undefined;
+  }): {
+    result: AgentDecisionServiceResult;
+    skillPlan?: SkillPlanResult;
+    intent?: RoutineActionIntent;
+    note: string;
+  } {
+    const result = this.decisions.fallbackForRejection({
+      input: input.decisionInput,
+      reason: `infeasible action: ${input.reason}`,
+    });
+    const fallbackPlan = this.intentFromDecisionResult({
+      agent: input.agent,
+      perception: input.perception,
+      bot: input.bot,
+      result,
+      objectiveTask: input.objectiveTask,
+    });
+    const fallbackFeasibility = this.validateLlmIntent({
+      agent: input.agent,
+      bot: input.bot,
+      perception: input.perception,
+      intent: fallbackPlan.intent,
+      affordances: input.affordances,
+      blockedTargetKeys: input.blockedTargetKeys,
+    });
+
+    if (fallbackFeasibility.ok) {
+      return {
+        result,
+        skillPlan: fallbackPlan.skillPlan,
+        intent: fallbackPlan.intent,
+        note: `fallback after infeasible action: ${input.reason}`,
+      };
+    }
+
+    return {
+      result,
+      intent: idleIntent(`fallback action also infeasible: ${fallbackFeasibility.reason}`),
+      note: `fallback action rejected: ${fallbackFeasibility.reason}`,
+    };
+  }
+
+  private skillInput(
+    agent: AgentConfig,
+    perception: RoutinePerceptionSnapshot,
+    bot: BotHandle | undefined,
+  ) {
+    return {
+      agent,
+      perception,
+      currentPosition: toPosition(bot?.entity?.position),
+      inventoryItemNames: bot?.inventory?.items().map((item) => item.name),
+      leaderUsername: this.subteams.leaderUsernameForAgent(agent.id),
+      attackTargetUsername: this.context.attackTargetUsername(),
+    };
+  }
+
+  private planUpdateTrigger(
+    agentId: string,
+    objectiveTask: string | undefined,
+    stuckAnalysis: StuckAnalysis,
+  ): string | undefined {
+    if (!objectiveTask?.trim()) {
+      return undefined;
+    }
+    const pending = this.taskState.pendingPlanReason(agentId);
+    if (pending) {
+      return pending;
+    }
+    const state = this.taskState.stateFor(agentId);
+    if (state.plan.length === 0) {
+      return "empty_plan";
+    }
+    if (stuckAnalysis.stuck) {
+      return `stuck:${stuckAnalysis.reason ?? "stuck"}`;
+    }
+    if (this.taskState.currentStepBlockedRepeatedly(agentId)) {
+      return "blocked_repeatedly";
+    }
+    return undefined;
+  }
+
+  private shouldRequestPlanUpdate(
+    agentId: string,
+    objectiveTask: string,
+    trigger: string,
+    stuckAnalysis: StuckAnalysis,
+  ): boolean {
+    const state = this.taskState.stateFor(agentId);
+    const currentStep = state.currentStepId
+      ? state.plan.find((step) => step.id === state.currentStepId)
+      : undefined;
+    const key = [
+      normalizeTaskText(objectiveTask),
+      trigger,
+      state.currentStepId ?? "",
+      currentStep?.status ?? "",
+      currentStep?.blocker ?? "",
+      this.taskState.currentStepBlockedCount(agentId),
+      stuckAnalysis.blockedTargetKeys.join("|"),
+    ].join("::");
+    if (this.lastPlanUpdateKeys.get(agentId) === key && state.plan.length > 0) {
+      return false;
+    }
+    this.lastPlanUpdateKeys.set(agentId, key);
+    return true;
   }
 
   private tracedPlan(input: {
@@ -1567,6 +2068,8 @@ class LiveSchedulerActions implements SchedulerActionRegistry {
 function addRuntimeAgent(
   agent: AgentConfig,
   deps: {
+    agents: AgentConfig[];
+    actionPreferences: Map<string, string[]>;
     registry: AgentRegistry;
     scheduler: AgentScheduler;
     context: LiveContext;
@@ -1576,14 +2079,20 @@ function addRuntimeAgent(
     connectAgent?: (agent: AgentConfig) => Promise<void>;
   },
 ): void {
+  const liveAgent = liveRuntimeAgent(agent);
+  deps.actionPreferences.set(agent.id, normalizeConfiguredAgentActions(agent.allowedActions));
+  if (!deps.agents.some((existing) => existing.id === liveAgent.id)) {
+    deps.agents.push(liveAgent);
+    deps.agents.sort((left, right) => left.id.localeCompare(right.id));
+  }
   if (!deps.registry.get(agent.id)) {
     deps.registry.register(agent);
   }
-  deps.context.addAgent(agent);
-  deps.subteams.addAgent(agent);
-  deps.scheduler.addAgent(agent);
-  deps.actions.addAgent(agent);
-  deps.competitive.addAgent(agent);
+  deps.context.addAgent(liveAgent);
+  deps.subteams.addAgent(liveAgent);
+  deps.scheduler.addAgent(liveAgent);
+  deps.actions.addAgent(liveAgent);
+  deps.competitive.addAgent(liveAgent);
 
   if (deps.connectAgent) {
     deps.connectAgent(agent).catch((error: unknown) => {
@@ -1611,6 +2120,12 @@ function agentConfigFromPayload(value: JsonValue | undefined): AgentConfig | und
   if (!id || !name || !username || !role) {
     return undefined;
   }
+  const configuredActions = source.allowedActions === undefined
+    ? undefined
+    : stringArrayPayload(source.allowedActions);
+  if (source.allowedActions !== undefined && (configuredActions?.length ?? 0) === 0) {
+    return undefined;
+  }
   return {
     id,
     name,
@@ -1624,11 +2139,9 @@ function agentConfigFromPayload(value: JsonValue | undefined): AgentConfig | und
     leader: source.leader === true,
     mode: "routine",
     routine: stringPayload(source.routine),
-    allowedActions: normalizeAgentActions(
-      stringArrayPayload(source.allowedActions).length > 0
-        ? stringArrayPayload(source.allowedActions)
-        : [...DEFAULT_AGENT_ACTIONS],
-    ),
+    allowedActions: configuredActions
+      ? normalizeConfiguredAgentActions(configuredActions)
+      : defaultAgentActionsForRole(role),
     providerRef,
     visibility: "ai",
   };
@@ -1703,6 +2216,16 @@ function briefingMessage(task: string, topic: "leader-briefing" | "subteam-task"
   return `${label}: ${brief}. Start with your roles and report blockers here.`;
 }
 
+function resetTaskStateForAgents(
+  taskState: AgentTaskStateStore,
+  agentIds: string[],
+  task: string,
+): void {
+  for (const agentId of [...new Set(agentIds)]) {
+    taskState.setGoal(agentId, task);
+  }
+}
+
 function briefingTaskFromDirectorEvent(event: GameEvent): string | undefined {
   const content = stringPayload(event.payload.content) ?? stringPayload(event.payload.message);
   if (!content) return undefined;
@@ -1715,6 +2238,14 @@ function briefingTaskFromDirectorEvent(event: GameEvent): string | undefined {
     return content;
   }
   return undefined;
+}
+
+function taskGoalFromDirectorEvent(event: GameEvent): string | undefined {
+  const content = stringPayload(event.payload.content) ?? stringPayload(event.payload.message);
+  if (!content || !isDirectorMessageEvent(event)) {
+    return undefined;
+  }
+  return isActionableInstructionText(content, stringPayload(event.payload.channel)) ? content : undefined;
 }
 
 function briefingTaskFromDirectorChat(message: AiChatMessage): string | undefined {
@@ -2000,6 +2531,143 @@ function personaForAgent(agent: AgentConfig, roleOverride?: string): StaticPerso
   };
 }
 
+function skillPlanNote(result: SkillPlanResult): string {
+  const status = result.failed ? "failed" : result.done ? "done" : result.action ? "acting" : "waiting";
+  return [
+    `skill=${result.skill}`,
+    `status=${status}`,
+    result.reason ? `reason=${result.reason}` : undefined,
+  ].filter((part): part is string => Boolean(part)).join(" ");
+}
+
+function applyStuckAnalysisToAffordances(
+  affordances: ActionAffordance[],
+  analysis: StuckAnalysis,
+): ActionAffordance[] {
+  if (analysis.blockedTargetKeys.length === 0) {
+    return affordances.map((affordance) => ({
+      ...affordance,
+      targetKey: affordance.targetKey ?? targetKeyForAction(affordance.action, affordance.params),
+    }));
+  }
+
+  const blockedTargets = new Set(analysis.blockedTargetKeys);
+  return affordances.map((affordance) => {
+    const targetKey = affordance.targetKey ?? targetKeyForAction(affordance.action, affordance.params);
+    if (!blockedTargets.has(targetKey)) {
+      return { ...affordance, targetKey };
+    }
+    return {
+      ...affordance,
+      targetKey,
+      blocked: true,
+      blockedReason: affordance.blockedReason
+        ?? "recently blocked; choose a different target/action or satisfy the blocker first",
+      score: Math.min(affordance.score, 0.05),
+    };
+  });
+}
+
+function promptRecoveryContext(analysis: StuckAnalysis) {
+  if (!analysis.stuck && analysis.blockedTargetKeys.length === 0) {
+    return undefined;
+  }
+  return {
+    stuck: analysis.stuck,
+    reason: analysis.reason,
+    blockedTargetKeys: analysis.blockedTargetKeys,
+    hint: analysis.recoveryPromptHint,
+  };
+}
+
+function stuckRecoveryMemories(analysis: StuckAnalysis) {
+  if (!analysis.stuck) {
+    return [];
+  }
+  return [{
+    id: "stuck-recovery",
+    summary: `Recovery needed: ${analysis.recoveryPromptHint ?? analysis.reason ?? "choose a different action or target"}`,
+    importance: 5,
+  }];
+}
+
+function stuckRecoveryConstraints(analysis: StuckAnalysis): string[] {
+  if (!analysis.stuck) {
+    return [];
+  }
+  return [
+    "RECOVERY: choose a different action/target than blockedTargetKeys, or choose a concrete action that satisfies the blocker.",
+    "Do not retry a blocked target unless the next action directly changes the missing tool/material/path condition.",
+  ];
+}
+
+function teamGoalSnapshotForAgent(
+  subteams: SubteamDirectory,
+  teamGoals: TeamGoalController,
+  agentId: string,
+) {
+  const team = subteams.teamForAgent(agentId);
+  return team ? teamGoals.snapshot(team.id) : undefined;
+}
+
+function withProgressSignal(result: ActionResult, signal: ProgressSignal): ActionResult {
+  const data = compactRecord({
+    ...(result.data ?? {}),
+    progressSignal: progressSignalData(signal),
+    progressChanged: signal.changed,
+    progressChanges: [...signal.changes],
+    progressSignature: signal.afterSignature,
+    progressDelta: Object.keys(signal.delta).length > 0 ? signal.delta : undefined,
+  });
+  return {
+    ...result,
+    data,
+  };
+}
+
+function inventoryForStuckAnalysis(
+  bot: BotHandle | undefined,
+  perception: RoutinePerceptionSnapshot,
+): JsonValue {
+  const botItems = bot?.inventory?.items?.().map((item) => ({
+    name: item.name,
+    count: item.count,
+  }));
+  if (botItems && botItems.length > 0) {
+    return botItems;
+  }
+  return {
+    tools: perception.inventory.tools,
+    seeds: perception.inventory.seeds,
+    ...(perception.inventory.food !== undefined ? { food: perception.inventory.food } : {}),
+  };
+}
+
+function liveRuntimeAgent(agent: AgentConfig): AgentConfig {
+  return {
+    ...agent,
+    allowedActions: normalizeConfiguredAgentActions(agent.allowedActions),
+  };
+}
+
+function roleActionPreferenceMemory(
+  agent: AgentConfig,
+  preferredActions: string[] | undefined,
+): { id: string; summary: string; importance: 4 } {
+  const preferences = preferredActions?.length
+    ? normalizeConfiguredAgentActions(preferredActions)
+    : defaultAgentActionsForRole(agent.role);
+  return {
+    id: "role-action-preferences",
+    summary: [
+      `Configured action set: ${preferences.join(", ")}.`,
+      "AVAILABLE_ACTIONS is the hard executable menu for this decision.",
+      "When multiple listed actions can work, prefer the ones that best match the role and current blocker.",
+    ].join(" "),
+    importance: 4,
+  };
+}
+
 function availableLiveActions(agent: AgentConfig, bot: BotHandle | undefined): AgentDecision["action"][] {
   const actions = new Set(allowedDecisionActionsForAgent(agent));
   if (!bot?.pathfinder) {
@@ -2274,9 +2942,17 @@ function stringPayload(value: JsonValue | undefined): string | undefined {
 }
 
 function stringArrayPayload(value: JsonValue | undefined): string[] {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string" && item.length > 0)
-    : [];
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const values: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string" || item.trim().length === 0) {
+      return [];
+    }
+    values.push(item.trim());
+  }
+  return values;
 }
 
 function uniqueStrings(values: Array<string | undefined>): string[] {
