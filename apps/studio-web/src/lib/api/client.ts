@@ -23,11 +23,11 @@ export class ApiError extends Error {
 
 export class ApiClient {
   private readonly baseUrl: string;
-  private readonly fetcher: typeof fetch;
+  private readonly fetcher?: typeof fetch;
 
   constructor(options: ApiClientOptions = {}) {
     this.baseUrl = options.baseUrl ?? apiBaseUrl();
-    this.fetcher = options.fetcher ?? fetch;
+    this.fetcher = options.fetcher;
   }
 
   async get<T>(path: string, init?: RequestInit): Promise<T> {
@@ -47,7 +47,7 @@ export class ApiClient {
     }
 
     try {
-      const response = await this.fetcher(url, { ...init, headers });
+      const response = await (this.fetcher ?? fetch)(url, { ...init, headers });
       const body = await parseJsonBody(response);
 
       if (!response.ok) {

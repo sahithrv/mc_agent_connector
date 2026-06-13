@@ -57,6 +57,16 @@ export class AgentRegistry {
     return this.agents.get(agentId)?.config;
   }
 
+  updateConfig(config: AgentConfig): AgentRuntimeView {
+    const record = this.requireRecord(config.id);
+    record.config = config;
+    if (config.mode) {
+      record.mode = config.mode;
+    }
+    record.updatedAt = new Date().toISOString();
+    return toView(config.id, record);
+  }
+
   updateMode(agentId: string, mode: AgentMode): AgentRuntimeView {
     const record = this.requireRecord(agentId);
     record.mode = mode;

@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 
 import {
   optionalBoolean,
+  optionalObject,
   optionalString,
   readJsonObject,
   requiredInteger,
@@ -27,6 +28,9 @@ export interface StudioConfig {
   llm: {
     maxConcurrency: number;
   };
+  plugin?: {
+    sharedSecret?: string;
+  };
 }
 
 export function defaultStudioConfigPath(): string {
@@ -45,6 +49,7 @@ export async function loadStudioConfig(
   const tickRates = requiredObject(source, "tickRates", filePath);
   const database = requiredObject(source, "database", filePath);
   const llm = requiredObject(source, "llm", filePath);
+  const plugin = optionalObject(source, "plugin", filePath);
 
   return {
     server: {
@@ -63,5 +68,10 @@ export async function loadStudioConfig(
     llm: {
       maxConcurrency: requiredInteger(llm, "maxConcurrency", filePath, 1, 100),
     },
+    plugin: plugin
+      ? {
+          sharedSecret: optionalString(plugin, "sharedSecret", filePath),
+        }
+      : undefined,
   };
 }

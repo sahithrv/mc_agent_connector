@@ -10,7 +10,7 @@ export function shouldUseStudioMocks(): boolean {
     return !["0", "false", "off", "no"].includes(flag.toLowerCase());
   }
 
-  return import.meta.env.DEV || import.meta.env.MODE === "test";
+  return import.meta.env.MODE === "test";
 }
 
 export function startMockStudioRuntime(): () => void {

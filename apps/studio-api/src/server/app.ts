@@ -13,6 +13,7 @@ import { registerDirectorRoutes } from "../director/routes";
 import { StudioEventBus } from "../events/bus";
 import { registerHealthRoutes } from "../http/health";
 import { registerPluginEventRoutes } from "../http/plugin-events";
+import { registerRuntimeRoutes, type RuntimeController } from "../runtime/routes";
 import { registerDashboardWs } from "../ws/hub";
 
 export interface CreateAppOptions {
@@ -22,6 +23,8 @@ export interface CreateAppOptions {
   chatRepository?: AiChatRepository;
   persistence?: StudioPersistence | false;
   pluginSharedSecret?: string;
+  runtimeController?: RuntimeController;
+  onAgentUpdated?: (agent: AgentConfig) => void;
 }
 
 export function createApp(options: CreateAppOptions): FastifyInstance {
@@ -64,6 +67,12 @@ export function createApp(options: CreateAppOptions): FastifyInstance {
     eventsRepository: persistence?.events,
     clipMarkers: persistence?.clipMarkers,
     sessionId: persistence?.session.id,
+    onAgentUpdated: options.onAgentUpdated,
+  });
+  registerRuntimeRoutes(app, {
+    agents: options.agents,
+    events: eventBus,
+    controller: options.runtimeController,
   });
   registerPluginEventRoutes(app, {
     events: eventBus,
@@ -71,7 +80,8 @@ export function createApp(options: CreateAppOptions): FastifyInstance {
     sessionId: persistence?.session.id,
     sharedSecret: options.pluginSharedSecret
       ?? process.env.MCAS_PLUGIN_SHARED_SECRET
-      ?? process.env.STUDIO_PLUGIN_SHARED_SECRET,
+      ?? process.env.STUDIO_PLUGIN_SHARED_SECRET
+      ?? options.studioConfig.plugin?.sharedSecret,
   });
   registerDashboardWs(app, { events: eventBus });
   return app;

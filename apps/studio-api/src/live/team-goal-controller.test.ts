@@ -101,6 +101,106 @@ test("TeamGoalController assigns claimed-site work by role", () => {
   assert.equal(farmerPlan.action?.params.block, "oak_planks");
 });
 
+test("TeamGoalController crafts a useful item when materials unblock the goal", () => {
+  const agents = [
+    agent("leader-1", "LeaderBot", "leader", true),
+    agent("farmer-1", "FarmerBot", "farmer"),
+  ];
+  const leaderBot = fakeBot({ username: "LeaderBot", entity: entity("LeaderBot", { x: 0, y: 64, z: 0 }) });
+  const bots = new Map<string, BotHandle>([
+    ["leader-1", leaderBot],
+    ["farmer-1", fakeBot({
+      username: "FarmerBot",
+      entity: entity("FarmerBot", { x: 29, y: 64, z: 0 }),
+      inventory: {
+        items: () => ["oak_planks", "stick"].map((name) => ({ name, count: 4 })),
+        emptySlotCount: () => 1,
+      },
+      recipesFor() {
+        return [{ id: "wooden-hoe" }];
+      },
+      async craft() {},
+    })],
+  ]);
+  const controller = controllerFor(agents, bots);
+
+  controller.plan({
+    agent: agents[0] as AgentConfig,
+    perception: perception("leader-1"),
+    goal: "build a village farm and gather food",
+  });
+  bots.set("leader-1", fakeBot({ username: "LeaderBot", entity: entity("LeaderBot", { x: 28, y: 64, z: 0 }) }));
+
+  const farmerPlan = controller.plan({
+    agent: agents[1] as AgentConfig,
+    perception: perception("farmer-1"),
+    goal: "build a village farm and gather food",
+  });
+
+  assert.equal(farmerPlan.action?.action, "craft_item");
+  assert.equal(farmerPlan.action?.params.item, "wooden_hoe");
+});
+
+test("TeamGoalController lets a non-miner gather safe visible materials", () => {
+  const agents = [
+    agent("leader-1", "LeaderBot", "leader", true),
+    agent("farmer-1", "FarmerBot", "farmer"),
+  ];
+  const bots = new Map<string, BotHandle>([
+    ["leader-1", fakeBot({ username: "LeaderBot", entity: entity("LeaderBot", { x: 0, y: 64, z: 0 }) })],
+    ["farmer-1", fakeBot({ username: "FarmerBot", entity: entity("FarmerBot", { x: 29, y: 64, z: 0 }) })],
+  ]);
+  const controller = controllerFor(agents, bots);
+
+  controller.plan({
+    agent: agents[0] as AgentConfig,
+    perception: perception("leader-1"),
+    goal: "build a village and gather materials",
+  });
+  bots.set("leader-1", fakeBot({ username: "LeaderBot", entity: entity("LeaderBot", { x: 28, y: 64, z: 0 }) }));
+
+  const farmerPlan = controller.plan({
+    agent: agents[1] as AgentConfig,
+    perception: perception("farmer-1", {
+      visibleBlocks: [
+        {
+          id: "stone-1",
+          type: "stone",
+          position: { x: 30, y: 64, z: 0 },
+          safe: true,
+        },
+      ],
+    }),
+    goal: "build a village and gather materials",
+  });
+
+  assert.equal(farmerPlan.action?.action, "mine_block");
+  assert.equal(farmerPlan.action?.params.block, "stone");
+});
+
+test("TeamGoalController records blocked reasons and a fallback note when no deterministic work exists", () => {
+  const messages: string[] = [];
+  const agents = [
+    agent("leader-1", "LeaderBot", "leader", true),
+    agent("farmer-1", "FarmerBot", "farmer"),
+  ];
+  const bots = new Map<string, BotHandle>([
+    ["farmer-1", fakeBot({ username: "FarmerBot", entity: entity("FarmerBot", { x: 0, y: 64, z: 0 }) })],
+  ]);
+  const controller = controllerFor(agents, bots, undefined, (message) => messages.push(message));
+
+  const plan = controller.plan({
+    agent: agents[1] as AgentConfig,
+    perception: perception("farmer-1"),
+    goal: "build a village",
+  });
+
+  assert.equal(plan.action, undefined);
+  assert.match(plan.note ?? "", /team autonomy no action/);
+  assert.match(plan.note ?? "", /no visible resources/);
+  assert.match(messages[0] ?? "", /no action: .*no visible resources/);
+});
+
 test("TeamGoalController avoids a recently failed movement target and retries after cooldown", () => {
   let now = 1_000;
   const agents = [agent("leader-1", "LeaderBot", "leader", true)];
@@ -269,7 +369,7 @@ test("TeamGoalController writes activity memory for returned physical actions", 
   assert.match(summary, /leader-1 doing move_to/);
   assert.match(summary, /miner-1 doing mine_block stone/);
   assert.match(summary, /farmer-1 doing place_block oak_planks/);
-  assert.match(summary, /collector-1 doing collect_item drop-1/);
+  assert.match(summary, /collector-1 doing collect_item cobblestone/);
   assert.match(summary, /guard-1 doing attack_entity Steve/);
 });
 

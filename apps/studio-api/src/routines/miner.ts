@@ -50,16 +50,12 @@ export class MinerRoutine implements Routine {
     if (!block || !canUseAction(agent, "mine_block")) {
       return {
         status: "idle",
-        reason: "no_safe_visible_block",
-        action: canUseAction(agent, "idle")
-          ? {
-              action: "idle",
-              params: { reason: "no_safe_visible_block" },
-              timeoutMs: 1_000,
-            }
-          : undefined,
+        reason: block ? "mine_block_not_allowed" : "no_safe_visible_block",
         taskEvents: [
-          taskEvent(agent, this.id, "idle", "no safe visible block to mine", {}),
+          taskEvent(agent, this.id, "idle", block ? "mine block action not allowed" : "no safe visible block to mine", {
+            reason: block ? "action_not_allowed" : "no_safe_target",
+            ...(block ? { blockId: block.id, blockType: block.type } : {}),
+          }),
         ],
       };
     }

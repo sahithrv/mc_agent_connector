@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 
-import type { AgentConfig, JsonValue } from "@mc-ai-video/contracts";
+import type { AgentBehaviorSettings, AgentConfig, JsonValue } from "@mc-ai-video/contracts";
 import type { FastifyInstance } from "fastify";
 
+import { DEFAULT_AGENT_ACTIONS, normalizeAgentActions } from "../agents/default-actions";
 import { AiChatService } from "../chat/service";
 import type { ClipMarkersRepository, EventsRepository } from "../db";
 import type { StudioEventBus } from "../events/bus";
@@ -27,20 +28,6 @@ const INJECTION_KINDS = [
   "instruction",
 ] as const;
 const INJECTION_SCOPES = ["agent", "subteam", "all"] as const;
-const DEFAULT_AGENT_ACTIONS = [
-  "idle",
-  "continue_routine",
-  "move_to",
-  "follow_player",
-  "flee",
-  "mine_block",
-  "collect_item",
-  "place_block",
-  "attack_entity",
-  "chat_public",
-  "chat_ai_private",
-] as const;
-
 export interface DirectorRoutesOptions {
   agents: AgentConfig[];
   chat: AiChatService;
@@ -48,9 +35,57 @@ export interface DirectorRoutesOptions {
   eventsRepository?: EventsRepository;
   clipMarkers?: ClipMarkersRepository;
   sessionId?: string;
+  onAgentUpdated?: (agent: AgentConfig) => void;
 }
 
 export function registerDirectorRoutes(app: FastifyInstance, options: DirectorRoutesOptions): void {
+  app.get("/director/agents", () => ({
+    agents: options.agents,
+  }));
+
+  app.patch("/director/agents/:agentId", (request, reply) => {
+    try {
+      const params = objectBody(request.params, "params");
+      const agentId = requiredString(params, "agentId", 128);
+      const source = objectBody(request.body);
+      const index = options.agents.findIndex((agent) => agent.id === agentId);
+      if (index < 0) {
+        return reply.status(404).send({ error: `unknown agent: ${agentId}` });
+      }
+
+      const agent = updateAgentConfigFromBody(options.agents[index], source);
+      const duplicateName = options.agents.find(
+        (existing) => existing.id !== agentId && existing.name === agent.name,
+      );
+      if (duplicateName) {
+        return reply.status(409).send({ error: `agent name already exists: ${agent.name}` });
+      }
+      const duplicateUsername = options.agents.find(
+        (existing) =>
+          existing.id !== agentId &&
+          existing.account.username === agent.account.username,
+      );
+      if (duplicateUsername) {
+        return reply.status(409).send({
+          error: `agent username already exists: ${agent.account.username}`,
+        });
+      }
+
+      options.agents[index] = agent;
+      options.onAgentUpdated?.(agent);
+      const command = emitCommand(options.events, {
+        type: "update-agent",
+        requestedBy: optionalString(source, "requestedBy", 128) ?? "director",
+        targetAgentId: agent.id,
+        payload: { agent: agentConfigJson(agent) },
+      });
+      return { ok: true, agent, command };
+    } catch (error) {
+      const response = validationResponse(error);
+      return reply.status(response.statusCode).send(response.body);
+    }
+  });
+
   app.post("/director/agents/:agentId/pause", (request, reply) => {
     try {
       const params = objectBody(request.params, "params");
@@ -289,7 +324,9 @@ function commandTypeForInjection(
 function agentConfigFromBody(body: unknown): AgentConfig {
   const source = objectBody(body);
   const account = objectBody(source.account, "account");
-  const allowedActions = stringArrayValue(source.allowedActions) ?? [...DEFAULT_AGENT_ACTIONS];
+  const allowedActions = normalizeAgentActions(
+    stringArrayValue(source.allowedActions) ?? [...DEFAULT_AGENT_ACTIONS],
+  );
   return {
     id: requiredString(source, "id", 128),
     name: requiredString(source, "name", 128),
@@ -301,12 +338,43 @@ function agentConfigFromBody(body: unknown): AgentConfig {
     team: optionalString(source, "team", 128),
     subteam: optionalString(source, "subteam", 128),
     leader: booleanValue(source.leader),
+    enabled: booleanValue(source.enabled),
+    personality: optionalString(source, "personality", 2_000),
+    behavior: behaviorValue(source.behavior),
     mode: "routine",
     routine: optionalString(source, "routine", 128),
     allowedActions,
     providerRef: optionalString(source, "providerRef", 128) ?? "deepseek",
     visibility: "ai",
   };
+}
+
+function updateAgentConfigFromBody(
+  current: AgentConfig,
+  source: Record<string, unknown>,
+): AgentConfig {
+  const account = source.account === undefined ? undefined : objectBody(source.account, "account");
+  const next: AgentConfig = {
+    ...current,
+    name: optionalString(source, "name", 128) ?? current.name,
+    account: {
+      ...current.account,
+      username: account ? optionalString(account, "username", 16) ?? current.account.username : current.account.username,
+      auth: account?.auth === "microsoft" ? "microsoft" : account?.auth === "offline" ? "offline" : current.account.auth,
+    },
+    role: optionalString(source, "role", 128) ?? current.role,
+    team: optionalString(source, "team", 128) ?? current.team,
+    subteam: optionalString(source, "subteam", 128) ?? current.subteam,
+    leader: booleanValue(source.leader) ?? current.leader,
+    enabled: booleanValue(source.enabled) ?? current.enabled,
+    personality: optionalString(source, "personality", 2_000) ?? current.personality,
+    behavior: source.behavior === undefined ? current.behavior : behaviorValue(source.behavior),
+    routine: optionalString(source, "routine", 128) ?? current.routine,
+    allowedActions: normalizeAgentActions(stringArrayValue(source.allowedActions) ?? current.allowedActions),
+    providerRef: optionalString(source, "providerRef", 128) ?? current.providerRef,
+  };
+
+  return next;
 }
 
 function agentConfigJson(agent: AgentConfig): Record<string, JsonValue> {
@@ -321,6 +389,9 @@ function agentConfigJson(agent: AgentConfig): Record<string, JsonValue> {
     team: agent.team,
     subteam: agent.subteam,
     leader: agent.leader,
+    enabled: agent.enabled,
+    personality: agent.personality,
+    behavior: behaviorJson(agent.behavior),
     mode: agent.mode,
     routine: agent.routine,
     allowedActions: agent.allowedActions,
@@ -344,6 +415,40 @@ function stringArrayValue(value: unknown): string[] | undefined {
 
 function booleanValue(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
+}
+
+function behaviorValue(value: unknown): AgentBehaviorSettings | undefined {
+  if (value === undefined) return undefined;
+  const source = objectBody(value, "behavior");
+  return {
+    riskTolerance: optionalBehaviorEnum(source, "riskTolerance", ["low", "medium", "high"] as const),
+    teamwork: optionalBehaviorEnum(source, "teamwork", ["solo", "balanced", "team-first"] as const),
+    initiative: optionalBehaviorEnum(source, "initiative", ["low", "medium", "high"] as const),
+  };
+}
+
+function behaviorJson(
+  behavior: AgentBehaviorSettings | undefined,
+): Record<string, JsonValue> | undefined {
+  if (!behavior) return undefined;
+  return compactJson({
+    riskTolerance: behavior.riskTolerance,
+    teamwork: behavior.teamwork,
+    initiative: behavior.initiative,
+  });
+}
+
+function optionalBehaviorEnum<T extends readonly string[]>(
+  source: Record<string, unknown>,
+  key: string,
+  values: T,
+): T[number] | undefined {
+  const value = source[key];
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !values.includes(value)) {
+    throw new RequestValidationError(`behavior.${key} must be one of: ${values.join(", ")}`);
+  }
+  return value;
 }
 
 function requiredEnum<T extends readonly string[]>(

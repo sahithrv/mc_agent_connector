@@ -4,9 +4,18 @@ import type { PromptContext, StaticPersona } from "./types";
 export const DEFAULT_DECISION_CONSTRAINTS = [
   "Choose exactly one high-level action.",
   "Use only the listed actions and provide only parameters needed for that action.",
+  "Use relationships and memories: help trusted allies, avoid or warn about low-trust/high-fear agents, and keep promises visible.",
   "Do not expose hidden reasoning; keep reasoningSummary short.",
   "Do not change static identity, role, team, or core persona during a decision.",
   "Avoid unsafe mining, griefing, friendly fire, and attacks on players unless explicitly allowed by scenario constraints.",
+];
+
+const ACTION_PARAMETER_RULES = [
+  "chat_public/chat_ai_private require speech.content or parameters.message; private chat may use recipientIds, subteamId, or leadersOnly.",
+  "move_to, mine_block, and place_block require a concrete position or x/y/z.",
+  "follow_player requires username/player/target; collect_item requires entityId/item/name.",
+  "craft_item requires item/name/block; attack_entity requires entityId/username/name/target.",
+  "flee requires position, entityId, username, or target; distance alone is not enough.",
 ];
 
 export function buildPersonaSystemPrompt(_persona: StaticPersona): string {
@@ -34,6 +43,9 @@ export function buildDecisionPrompt(input: DecisionPromptInput): string {
     "",
     "CONSTRAINTS",
     constraints.map((constraint) => `- ${constraint}`).join("\n"),
+    "",
+    "ACTION_PARAMETER_RULES",
+    ACTION_PARAMETER_RULES.map((rule) => `- ${rule}`).join("\n"),
     "",
     "CONTEXT",
     input.context.contextText,

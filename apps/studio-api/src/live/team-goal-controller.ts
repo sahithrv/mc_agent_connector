@@ -91,8 +91,10 @@ const AUTONOMY_GOAL_PATTERN =
   /\b(follow|leader|go|move|find|scout|build|village|base|camp|house|mine|gather|collect|farm|patrol|guard|hunt|kill|attack|eliminate|prepare|survive)\b/i;
 const ATTACK_GOAL_PATTERN = /\b(kill|attack|hunt|eliminate)\b/i;
 const MINEABLE_BLOCK_PATTERN = /stone|deepslate|dirt|gravel|coal_ore|iron_ore|copper_ore|log|wood/i;
-const RESOURCE_ITEM_PATTERN = /item|cobblestone|dirt|seed|log|planks|stone|ore|ingot|coal|wheat|carrot|potato|wood/i;
+const RESOURCE_ITEM_PATTERN = /cobblestone|dirt|seed|log|planks|stone|ore|ingot|coal|wheat|carrot|potato|wood/i;
 const PLACEABLE_ITEM_PATTERN = /dirt|cobblestone|stone|planks|log|wood|brick|sand|gravel|glass/i;
+const WOOD_ITEM_PATTERN = /log|wood|planks/i;
+const MAX_RESOURCE_ITEM_DISTANCE = 12;
 
 const SCOUT_OFFSETS: PositionOffset[] = [
   { x: 28, z: 0 },
@@ -405,10 +407,25 @@ export class TeamGoalController {
       }
     }
 
-    if ((role.includes("farmer") || role.includes("builder") || role.includes("leader")) && hasPlaceableInventory(bot)) {
+    const craftIntent = this.craftIntent(input, role, bot);
+    if (craftIntent) {
+      return craftIntent;
+    }
+
+    const item = this.nearbyResourceItem(input.perception, input.agent.id);
+    if (item && canUse(input.agent, "collect_item") && bot?.collectBlock) {
+      return {
+        action: "collect_item",
+        params: { entityId: item.id, item: item.type, reason: "collecting dropped supplies for subteam goal" },
+        timeoutMs: 10_000,
+        requestedBy: "live-autonomy",
+      };
+    }
+
+    if (hasPlaceableInventory(bot) && canUse(input.agent, "place_block")) {
       const target = this.placeTarget(input.agent.id, state);
       const block = firstPlaceableItem(bot);
-      if (target && block && canUse(input.agent, "place_block")) {
+      if (target && block) {
         return {
           action: "place_block",
           params: {
@@ -425,7 +442,6 @@ export class TeamGoalController {
     const mineable = this.mineableBlock(input.perception, input.agent.id);
     if (
       mineable
-      && (role.includes("miner") || role.includes("builder") || role.includes("leader"))
       && !this.teammateAlreadyMining(input.agent.id, role, mineable.type, recentMemory)
       && canUse(input.agent, "mine_block")
     ) {
@@ -441,14 +457,38 @@ export class TeamGoalController {
       };
     }
 
-    const item = this.nearbyResourceItem(input.perception, input.agent.id);
-    if (item && canUse(input.agent, "collect_item") && bot?.collectBlock) {
-      return {
-        action: "collect_item",
-        params: { entityId: item.id, reason: "collecting dropped supplies for subteam goal" },
-        timeoutMs: 10_000,
-        requestedBy: "live-autonomy",
-      };
+    return undefined;
+  }
+
+  private craftIntent(
+    input: TeamGoalPlanInput,
+    role: string,
+    bot: BotHandle | undefined,
+  ): RoutineActionIntent | undefined {
+    if (!canUse(input.agent, "craft_item") || !bot?.craft || !bot.recipesFor) {
+      return undefined;
+    }
+
+    const inventory = inventoryNames(bot);
+    const goal = input.goal?.toLowerCase() ?? "";
+    const wantsFarm = role.includes("farmer") || /\b(farm|food|crop|seed|wheat|carrot|potato)\b/.test(goal);
+    const wantsMine = role.includes("miner") || /\b(mine|gather|stone|ore|coal|iron|build|base|village)\b/.test(goal);
+    const wantsLight = /\b(mine|cave|night|torch|safe|base|village)\b/.test(goal);
+
+    if (wantsFarm && !inventory.some((name) => /hoe/i.test(name)) && inventory.some((name) => WOOD_ITEM_PATTERN.test(name))) {
+      return craftItemIntent("wooden_hoe", "crafting hoe to unblock farming");
+    }
+
+    if (wantsMine && !inventory.some((name) => /pickaxe/i.test(name)) && inventory.some((name) => WOOD_ITEM_PATTERN.test(name))) {
+      return craftItemIntent("wooden_pickaxe", "crafting pickaxe to gather team materials");
+    }
+
+    if (wantsLight && inventory.some((name) => /coal|charcoal/i.test(name)) && inventory.some((name) => /stick/i.test(name))) {
+      return craftItemIntent("torch", "crafting torches for safer team work");
+    }
+
+    if (/\b(build|base|village|craft|tool)\b/.test(goal) && !inventory.some((name) => name === "crafting_table") && inventory.some((name) => /planks|log|wood/i.test(name))) {
+      return craftItemIntent("crafting_table", "crafting table to unlock team tools");
     }
 
     return undefined;
@@ -510,11 +550,7 @@ export class TeamGoalController {
 
   private nearbyResourceItem(perception: PerceptionSnapshot, agentId: string): PerceptionSnapshot["nearbyEntities"][number] | undefined {
     const current = this.currentPosition(agentId);
-    return perception.nearbyEntities.find((entity) =>
-      entity.hostile !== true
-      && RESOURCE_ITEM_PATTERN.test(entity.type)
-      && (!current || !entity.position || distance(current, entity.position) <= 96),
-    );
+    return perception.nearbyEntities.find((entity) => isNearbyResourceItem(entity, current));
   }
 
   private scoutTarget(team: SubteamView, current: Position): Position {
@@ -730,6 +766,26 @@ function canUse(agent: AgentConfig, action: string): boolean {
   return agent.allowedActions.includes(action);
 }
 
+function isNearbyResourceItem(
+  entity: PerceptionSnapshot["nearbyEntities"][number],
+  current: Position | undefined,
+): boolean {
+  if (!entity.id || entity.hostile === true || !entity.position) {
+    return false;
+  }
+  return Boolean(entity.id)
+    && isSpecificResourceItemType(entity.type)
+    && (!current || distance(current, entity.position) <= MAX_RESOURCE_ITEM_DISTANCE);
+}
+
+function isSpecificResourceItemType(type: string): boolean {
+  const normalized = type.trim().toLowerCase();
+  return normalized !== "item"
+    && normalized !== "object"
+    && normalized !== "dropped_item"
+    && RESOURCE_ITEM_PATTERN.test(normalized);
+}
+
 function entityName(entity: { name?: string; displayName?: string; type?: string }): string {
   return entity.name ?? entity.displayName ?? entity.type ?? "";
 }
@@ -742,6 +798,23 @@ function firstPlaceableItem(bot: BotHandle | undefined): string | undefined {
   return bot?.inventory?.items()
     .map((item) => item.name)
     .find((name) => PLACEABLE_ITEM_PATTERN.test(name));
+}
+
+function inventoryNames(bot: BotHandle): string[] {
+  return bot.inventory?.items().map((item) => item.name.toLowerCase()) ?? [];
+}
+
+function craftItemIntent(item: string, reason: string): RoutineActionIntent {
+  return {
+    action: "craft_item",
+    params: {
+      item,
+      count: item === "torch" ? 4 : 1,
+      reason,
+    },
+    timeoutMs: 8_000,
+    requestedBy: "live-autonomy",
+  };
 }
 
 function safeBlockAt(bot: BotHandle, position: Position) {

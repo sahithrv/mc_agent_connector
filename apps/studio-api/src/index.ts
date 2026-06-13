@@ -1,10 +1,12 @@
 import { loadAgentConfigs } from "./config/agents";
+import { loadLocalEnvFiles } from "./config/env";
 import { formatStartupError } from "./config/errors";
 import { loadStudioConfig } from "./config/studio";
 import { createApp } from "./server/app";
 
 export async function main(): Promise<void> {
   try {
+    loadLocalEnvFiles();
     const studioConfig = await loadStudioConfig();
     const agents = await loadAgentConfigs();
     const app = createApp({ studioConfig, agents });

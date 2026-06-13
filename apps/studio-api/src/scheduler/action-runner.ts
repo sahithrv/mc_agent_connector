@@ -1,4 +1,4 @@
-import type { ActionRequest, ActionResult, AgentConfig } from "@mc-ai-video/contracts";
+import type { ActionRequest, ActionResult, AgentConfig, JsonValue } from "@mc-ai-video/contracts";
 
 import type { RoutineActionIntent } from "../routines";
 import type { RuntimeState } from "./runtime";
@@ -75,11 +75,18 @@ export class ActionSlotRunner {
     state.action = undefined;
     state.publicState.currentActionId = undefined;
     if (state.publicState.mode === "acting") state.publicState.mode = agent.mode ?? "routine";
+    const payload: Record<string, JsonValue> = {
+      action: result.action,
+      requestId: result.requestId,
+      ok: result.ok,
+    };
+    if (result.error) payload.error = result.error;
+    if (result.data) payload.data = result.data;
     this.deps.emit({
       type: "scheduler.action.finished",
       agentId: agent.id,
       severity: result.ok ? 1 : 3,
-      payload: { action: result.action, requestId: result.requestId, ok: result.ok },
+      payload,
     });
   }
 

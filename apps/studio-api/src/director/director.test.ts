@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
+import type { AgentConfig } from "@mc-ai-video/contracts";
+
 import { StudioEventBus } from "../events/bus";
 import type { DirectorCommand } from "../events/types";
 import { createStudioPersistence } from "../db/runtime";
@@ -107,6 +109,45 @@ test("director can add an agent to the active session", async () => {
   await app.close();
 });
 
+test("director lists and updates session agent configuration", async () => {
+  const eventBus = new StudioEventBus();
+  const commands: DirectorCommand[] = [];
+  const agents = [agent("farmer-1")];
+  eventBus.subscribe("director.command", (command) => commands.push(command));
+  const app = createApp({ studioConfig: testConfig(), agents, eventBus });
+
+  const listResponse = await app.inject({
+    method: "GET",
+    url: "/director/agents",
+  });
+  const updateResponse = await app.inject({
+    method: "PATCH",
+    url: "/director/agents/farmer-1",
+    payload: {
+      name: "Farm Lead",
+      role: "Leader",
+      team: "emerald",
+      personality: "Careful planner",
+      enabled: false,
+      behavior: {
+        riskTolerance: "low",
+        teamwork: "team-first",
+        initiative: "medium",
+      },
+    },
+  });
+
+  assert.equal(listResponse.statusCode, 200);
+  assert.equal(listResponse.json().agents.length, 1);
+  assert.equal(updateResponse.statusCode, 200);
+  assert.equal(agents[0].name, "Farm Lead");
+  assert.equal(agents[0].enabled, false);
+  assert.equal(updateResponse.json().agent.behavior.teamwork, "team-first");
+  assert.equal(commands[0]?.type, "update-agent");
+  assert.equal(commands[0]?.targetAgentId, "farmer-1");
+  await app.close();
+});
+
 test("director event injection and clip markers persist", async () => {
   const persistence = createStudioPersistence(":memory:");
   const app = createApp({ studioConfig: testConfig(), agents: [], persistence });
@@ -147,7 +188,7 @@ function testConfig() {
   };
 }
 
-function agent(id: string) {
+function agent(id: string): AgentConfig {
   return {
     id,
     name: id,

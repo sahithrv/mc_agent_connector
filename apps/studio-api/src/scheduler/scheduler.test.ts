@@ -6,7 +6,7 @@ import type { ActionRequest, ActionResult, AgentConfig, GameEvent } from "@mc-ai
 import { AgentScheduler } from "./scheduler";
 import type { ActionRegistry, DecisionPlanner, SchedulerEvent } from "./types";
 import type { PerceptionProvider } from "./types";
-import { FarmerRoutine, type PerceptionSnapshot, type Routine } from "../routines";
+import { FarmerRoutine, defaultRoutines, type PerceptionSnapshot, type Routine } from "../routines";
 
 test("20 agents tick without exceeding configured LLM planning slots", async () => {
   const agents = Array.from({ length: 20 }, (_, index) => agent(`agent-${index}`));
@@ -174,6 +174,146 @@ test("planned actions queue when action slots are full and run later", async () 
 
   resolvers.shift()?.();
   await scheduler.waitForIdle();
+});
+
+test("paused agents ignore wakeups until resumed", async () => {
+  const ada = agent("ada");
+  let planCalls = 0;
+  const scheduler = createScheduler({
+    agents: [ada],
+    planner: {
+      async plan() {
+        planCalls += 1;
+        return {};
+      },
+    },
+  });
+
+  scheduler.pauseAgent(ada.id);
+  scheduler.queuePlanning(ada.id);
+  await scheduler.tick();
+  assert.equal(planCalls, 0);
+  assert.equal(scheduler.stateFor(ada.id)?.planningQueued, false);
+
+  scheduler.resumeAgent(ada.id);
+  await scheduler.tick();
+  await scheduler.waitForIdle();
+  assert.equal(planCalls, 1);
+});
+
+test("survival precheck lets a farmer answer a nearby hostile before farmer idle", async () => {
+  const farmer = agent("farmer", "farmer", "red", "farmer", ["idle", "attack_entity", "flee"]);
+  const started: string[] = [];
+  const scheduler = createScheduler({
+    agents: [farmer],
+    routines: defaultRoutines(),
+    actions: {
+      canRun: () => true,
+      async run(_agent, request) {
+        started.push(`${request.agentId}:${request.action}`);
+        return result(request, true);
+      },
+    },
+    perception: {
+      async snapshot() {
+        return perception("farmer", {
+          health: 20,
+          nearbyEntities: [
+            {
+              id: "zombie-1",
+              type: "zombie",
+              hostile: true,
+              position: { x: 2, y: 64, z: 0 },
+            },
+          ],
+        });
+      },
+    },
+  });
+
+  await scheduler.tick();
+  await scheduler.waitForIdle();
+
+  assert.deepEqual(started, ["farmer:attack_entity"]);
+});
+
+test("survival precheck lets a farmer collect a useful nearby drop before idle", async () => {
+  const farmer = agent("farmer", "farmer", "red", "farmer", ["idle", "collect_item"]);
+  const started: string[] = [];
+  const scheduler = createScheduler({
+    agents: [farmer],
+    routines: defaultRoutines(),
+    actions: {
+      canRun: () => true,
+      async run(_agent, request) {
+        started.push(`${request.agentId}:${request.action}`);
+        return result(request, true);
+      },
+    },
+    perception: {
+      async snapshot() {
+        return perception("farmer", {
+          nearbyEntities: [
+            {
+              id: "seeds-1",
+              type: "wheat_seeds",
+              hostile: false,
+              position: { x: 1, y: 64, z: 0 },
+            },
+          ],
+        });
+      },
+    },
+  });
+
+  await scheduler.tick();
+  await scheduler.waitForIdle();
+
+  assert.deepEqual(started, ["farmer:collect_item"]);
+});
+
+test("routine idle does not monopolize action slots", async () => {
+  const agents = [
+    agent("farmer", "farmer", "red", "farmer", ["idle"]),
+    agent("miner", "miner", "red", "miner", ["mine_block"]),
+  ];
+  const started: string[] = [];
+  const scheduler = createScheduler({
+    agents,
+    routines: defaultRoutines(),
+    maxConcurrentActions: 1,
+    actions: {
+      canRun: () => true,
+      async run(_agent, request) {
+        started.push(`${request.agentId}:${request.action}`);
+        return result(request, true);
+      },
+    },
+    perception: {
+      async snapshot(item) {
+        if (item.id === "miner") {
+          return perception("miner", {
+            inventory: { tools: ["wooden_pickaxe"], seeds: 0 },
+            visibleBlocks: [
+              {
+                id: "stone-1",
+                type: "stone",
+                position: { x: 1, y: 64, z: 0 },
+                safe: true,
+              },
+            ],
+          });
+        }
+        return perception("farmer");
+      },
+    },
+  });
+
+  await scheduler.tick();
+  await scheduler.waitForIdle();
+
+  assert.deepEqual(started, ["miner:mine_block"]);
+  assert.equal(started.includes("farmer:idle"), false);
 });
 
 function createScheduler(overrides: {

@@ -1,8 +1,12 @@
 import type {
+  AgentConfig,
   AiChatMessage,
+  BotConnectionStatus,
   EventSeverity,
   GameEvent,
   JsonValue,
+  RuntimeAgentControlResult,
+  RuntimeStatusSnapshot,
   Visibility,
 } from "@mc-ai-video/contracts";
 
@@ -98,6 +102,10 @@ export const mockDirectorApi = {
     }
 
     if (pathname === "/director/agents") {
+      if ((init.method ?? "GET").toUpperCase() === "GET") {
+        return { agents: studioStore.getSnapshot().agents } as T;
+      }
+
       const input = body as {
         id?: string;
         name?: string;
@@ -126,6 +134,71 @@ export const mockDirectorApi = {
         agent,
         command: command("add-agent", { agent: agent as unknown as Record<string, JsonValue> }, agent.id),
       });
+    }
+
+    const updateMatch = /^\/director\/agents\/([^/]+)$/.exec(pathname);
+    if (updateMatch && (init.method ?? "GET").toUpperCase() === "PATCH") {
+      const agentId = decodeURIComponent(updateMatch[1]);
+      const input = body as Partial<AgentConfig>;
+      const snapshot = studioStore.getSnapshot();
+      const agents = snapshot.agents.map((agent) =>
+        agent.id === agentId
+          ? {
+              ...agent,
+              ...input,
+              account: {
+                ...agent.account,
+                ...(input.account ?? {}),
+              },
+              mode: agent.mode,
+              updatedAt: new Date().toISOString(),
+            }
+          : agent,
+      );
+      const agent = agents.find((candidate) => candidate.id === agentId);
+      if (!agent) {
+        throw new Error(`unknown agent: ${agentId}`);
+      }
+      studioStore.reset({ ...snapshot, agents });
+      return response<T>({
+        agent,
+        command: command("update-agent", { agent: agent as unknown as Record<string, JsonValue> }, agent.id),
+      });
+    }
+
+    if (pathname === "/runtime/status") {
+      return runtimeStatusFromStore() as T;
+    }
+
+    if (pathname === "/runtime/launch") {
+      const input = body as { agentIds?: string[]; scenarioGoal?: string };
+      const ids = Array.isArray(input.agentIds) ? input.agentIds : [];
+      setAgentRuntimeStatus(new Set(ids), "connected");
+      return {
+        ok: true,
+        results: ids.map((agentId) => runtimeResult(agentId, "connected", true)),
+      } as T;
+    }
+
+    const stopMatch = /^\/runtime\/agents\/([^/]+)\/stop$/.exec(pathname);
+    if (stopMatch) {
+      const agentId = decodeURIComponent(stopMatch[1]);
+      setAgentRuntimeStatus(new Set([agentId]), "disconnected");
+      return {
+        ok: true,
+        results: [runtimeResult(agentId, "disconnected", true)],
+      } as T;
+    }
+
+    if (pathname === "/runtime/agents/stop-all") {
+      const input = body as { agentIds?: string[] };
+      const snapshot = studioStore.getSnapshot();
+      const ids = Array.isArray(input.agentIds) ? input.agentIds : snapshot.agents.map((agent) => agent.id);
+      setAgentRuntimeStatus(new Set(ids), "disconnected");
+      return {
+        ok: true,
+        results: ids.map((agentId) => runtimeResult(agentId, "disconnected", true)),
+      } as T;
     }
 
     if (pathname === "/chat/messages") {
@@ -247,6 +320,82 @@ function setAgentModes(agentIds: Set<string> | undefined, mode: UiAgentRuntime["
   });
 }
 
+function setAgentRuntimeStatus(agentIds: Set<string>, connectionStatus: BotConnectionStatus): void {
+  const snapshot = studioStore.getSnapshot();
+  const now = new Date().toISOString();
+  const agents = snapshot.agents.map((agent) =>
+    agentIds.has(agent.id)
+      ? {
+          ...agent,
+          connectionStatus,
+          mode: (connectionStatus === "disconnected" ? "paused" : "routine") as UiAgentRuntime["mode"],
+          currentTask: connectionStatus === "connected" ? "Launched from guided flow" : "Stopped by runtime control",
+          updatedAt: now,
+          health: {
+            ...agent.health,
+            connectionStatus,
+            hasBot: connectionStatus === "connected",
+          },
+        }
+      : agent,
+  );
+
+  studioStore.reset({
+    ...snapshot,
+    agents,
+    health: {
+      ...snapshot.health,
+      bots: {
+        ...snapshot.health.bots,
+        connected: agents.filter((agent) => agent.connectionStatus === "connected").length,
+        total: agents.length,
+      },
+    },
+  });
+}
+
+function runtimeStatusFromStore(): RuntimeStatusSnapshot {
+  const snapshot = studioStore.getSnapshot();
+  return {
+    ok: true,
+    capabilities: {
+      launch: true,
+      stop: true,
+      restart: false,
+    },
+    minecraft: {
+      status: snapshot.health.minecraft.status,
+      message: snapshot.health.minecraft.message ?? "Mock Minecraft runtime ready",
+      host: "127.0.0.1",
+      port: 25565,
+      checkedAt: new Date().toISOString(),
+    },
+    agents: snapshot.agents.map((agent) => ({
+      agentId: agent.id,
+      mode: agent.mode,
+      connectionStatus: agent.connectionStatus ?? (agent.mode === "failed" ? "failed" : "connected"),
+      hasBot: agent.mode !== "failed" && agent.mode !== "paused",
+      currentTask: agent.currentTask,
+      lastError: agent.lastError,
+      position: agent.position,
+      updatedAt: agent.updatedAt ?? new Date().toISOString(),
+    })),
+  };
+}
+
+function runtimeResult(
+  agentId: string,
+  connectionStatus: BotConnectionStatus,
+  ok: boolean,
+): RuntimeAgentControlResult {
+  return {
+    agentId,
+    ok,
+    connectionStatus,
+    mode: connectionStatus === "failed" ? "failed" : connectionStatus === "disconnected" ? "paused" : "routine",
+  };
+}
+
 function controlResponse(
   type: AgentControlResponse["command"]["type"],
   targetAgentId?: string,
@@ -320,7 +469,8 @@ function isMockablePath(pathname: string): boolean {
   return (
     pathname === "/healthz" ||
     pathname === "/chat/messages" ||
-    pathname.startsWith("/director/")
+    pathname.startsWith("/director/") ||
+    pathname.startsWith("/runtime/")
   );
 }
 

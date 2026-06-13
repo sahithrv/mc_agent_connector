@@ -23,7 +23,16 @@ Set-Content eula.txt "eula=true"
 java -Xmx2G -jar paper.jar --nogui
 ```
 
-Keep `plugins/McAiStudioBridge/config.yml` `backend.shared-secret` aligned with the backend's `MCAS_PLUGIN_SHARED_SECRET`. Backend startup and health checks pass even with no plugin installed.
+Create a local `.env` in the repo root if you want backend commands to pick up secrets automatically:
+
+```powershell
+Copy-Item .env.example .env
+# Edit .env and set DEEPSEEK_API_KEY.
+```
+
+The backend loads `.env` and `.env.local` from the repo root and `apps/studio-api`. Shell environment variables still win over file values.
+
+Keep `plugins/McAiStudioBridge/config.yml` `backend.shared-secret` aligned with the backend's `MCAS_PLUGIN_SHARED_SECRET` or `plugin.sharedSecret` in `config/studio.config.json`. The checked-in local configs both use `dev-local-secret`. Backend startup and health checks pass even with no plugin installed.
 
 ## Checks
 
@@ -33,7 +42,9 @@ Keep `plugins/McAiStudioBridge/config.yml` `backend.shared-secret` aligned with 
 4. Twenty bots: connect in batches, watch backend and Paper logs for rejected or timed-out forwards.
 5. Dashboard later: start the dashboard separately, then verify public chat, private chat, recorder events, and director controls in separate panels.
 
-For live agent planning, stop any separate `start:api` and `connect-agents` processes, then run `npm run live:agents` from the repo root. This starts the Studio backend, connects the configured bots, and wakes agent planning when Paper forwards `/aichat` or public chat events. Use `/aichat <task>` in Minecraft to give the roster a task.
+For live agent planning, stop any separate `start:api` and `connect-agents` processes, then run `npm run live:agents` from the repo root. This starts the Studio backend and live planner, then waits for the dashboard launch flow to connect selected bots. Set `MC_AUTO_CONNECT_AGENTS=true` to restore the old behavior of connecting the configured roster immediately. Planning wakes when Paper forwards `/aichat` or public chat events. Use `/aichat <task>` in Minecraft to give the roster a task.
+
+The web app uses the real backend by default. Only set `VITE_STUDIO_MOCKS=1` when you want a fake UI demo; mock mode accepts launches in the website but does not connect Mineflayer bots to Paper. In the Run Flow header, `/runtime` means real backend and `mock runtime` means no real bots will join.
 
 ## Live Subteams
 

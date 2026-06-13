@@ -47,6 +47,7 @@ function normalizeDecision(value: unknown): unknown {
   return {
     ...source,
     parameters: source.parameters ?? source.params ?? {},
+    speech: source.speech ?? undefined,
     reasoningSummary: source.reasoningSummary ?? source.reasoning_summary ?? source.summary ?? source.reasoning,
   };
 }

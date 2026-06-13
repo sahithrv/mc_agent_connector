@@ -1,8 +1,6 @@
 import {
   Activity,
-  Bot,
   Clapperboard,
-  Gauge,
   MessageSquare,
   TerminalSquare,
   Users,
@@ -12,6 +10,7 @@ import { useMemo, useState, type ReactNode } from "react";
 import { AgentWorkspace } from "../agents/AgentWorkspace";
 import { ChatWorkspace } from "../chat/ChatWorkspace";
 import { EventDirectorWorkspace } from "../director";
+import { RunFlowWorkspace } from "../flow/RunFlowWorkspace";
 import { HealthBanner } from "../session/HealthBanner";
 import { ScenarioDebugWorkspace } from "../scenario";
 import { AppHeader } from "./AppHeader";
@@ -29,12 +28,8 @@ import { studioStore, useStudioStore } from "../../lib/state/store";
 export function DashboardShell(): JSX.Element {
   const [activeSection, setActiveSection] = useState<DashboardSectionId>("command");
   const mockMode = shouldUseStudioMocks();
-  const agentCount = useStudioStore((state) => state.agents.length);
-  const eventCount = useStudioStore((state) => state.events.length);
-  const chatCount = useStudioStore((state) => state.chat.length);
   const events = useStudioStore((state) => state.events);
   const agents = useStudioStore((state) => state.agents);
-  const queue = useStudioStore((state) => state.health.llmQueue);
   const mockProps = useMemo(
     () =>
       mockMode
@@ -74,40 +69,11 @@ export function DashboardShell(): JSX.Element {
           >
             <div className="section-head">
               <h2 className="section-title" id="command-surface-title">
-                Command Deck
+                Guided Run Flow
               </h2>
-              <span className="rail-meta">{mockMode ? "mock stream" : "/dashboard"}</span>
+              <span className="rail-meta">{mockMode ? "mock runtime" : "/runtime"}</span>
             </div>
-            <div className="placeholder-grid command-overview-grid">
-              <div className="command-surface">
-                <div className="command-map" role="status">
-                  <div className="command-map__node command-map__node--hot">
-                    <span>Agents</span>
-                    <strong>{agentCount}</strong>
-                  </div>
-                  <div className="command-map__trace" aria-hidden="true" />
-                  <div className="command-map__node">
-                    <span>Events</span>
-                    <strong>{eventCount}</strong>
-                  </div>
-                  <div className="command-map__trace command-map__trace--wide" aria-hidden="true" />
-                  <div className="command-map__node command-map__node--chat">
-                    <span>Private/Public Chat</span>
-                    <strong>{chatCount}</strong>
-                  </div>
-                  <div className="command-map__node command-map__node--queue">
-                    <span>LLM Pressure</span>
-                    <strong>{queue.active}/{queue.queued}</strong>
-                  </div>
-                </div>
-              </div>
-              <div className="metrics-grid" aria-label="Session totals">
-                <Metric icon={<Bot size={16} />} label="Agents" value={agentCount} />
-                <Metric icon={<Activity size={16} />} label="Events" value={eventCount} />
-                <Metric icon={<MessageSquare size={16} />} label="AI Chat" value={chatCount} />
-                <Metric icon={<Gauge size={16} />} label="Queue" value={`${queue.active}/${queue.queued}`} />
-              </div>
-            </div>
+            <RunFlowWorkspace />
           </section>
           <DashboardBand id="agents" meta="F08-F12 / F28-F30" title="Agent Operations">
             <AgentWorkspace
@@ -178,18 +144,6 @@ export function DashboardShell(): JSX.Element {
   );
 }
 
-function Metric(props: { icon: JSX.Element; label: string; value: number | string }): JSX.Element {
-  return (
-    <div className="metric-box">
-      <div className="health-value">
-        {props.icon}
-        <span className="metric-label">{props.label}</span>
-      </div>
-      <div className="metric-value">{props.value}</div>
-    </div>
-  );
-}
-
 function DashboardBand(props: {
   id: DashboardSectionId;
   meta: string;
@@ -218,7 +172,7 @@ function DashboardBand(props: {
 export type DashboardSectionId = (typeof navItems)[number]["id"];
 
 export const navItems = [
-  { id: "command", label: "Command", meta: "F03", icon: TerminalSquare },
+  { id: "command", label: "Run Flow", meta: "F03", icon: TerminalSquare },
   { id: "agents", label: "Agents", meta: "F08", icon: Users },
   { id: "events", label: "Events", meta: "F17-F25", icon: Activity },
   { id: "chat", label: "AI Chat", meta: "F13", icon: MessageSquare },

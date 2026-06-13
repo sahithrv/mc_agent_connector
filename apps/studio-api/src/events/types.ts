@@ -29,7 +29,8 @@ export interface DirectorCommand {
     | "set-agent-task"
     | "set-subteam-task"
     | "god-dialogue"
-    | "add-agent";
+    | "add-agent"
+    | "update-agent";
   requestedBy?: string;
   targetAgentId?: string;
   reason?: string;

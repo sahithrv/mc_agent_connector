@@ -77,22 +77,25 @@ export function TeamRosterPanel({ agents, roster }: TeamRosterPanelProps): JSX.E
 function groupAgentsByTeam(agents: UiAgentRuntime[], fallbackName: string) {
   const groups = new Map<string, { id: string; name: string; agents: UiAgentRuntime[] }>();
 
-  // Agent configs only expose a team id, so the roster labels preserve that id until scenario names land.
   for (const agent of agents) {
-    const teamId = agent.team ?? "ai-unassigned";
+    const teamId = coordinationGroupId(agent) || "ai-unassigned";
     const existing = groups.get(teamId);
     if (existing) {
       existing.agents.push(agent);
     } else {
       groups.set(teamId, {
         id: teamId,
-        name: agent.team ? `AI: ${agent.team}` : fallbackName,
+        name: teamId === "ai-unassigned" ? fallbackName : `AI: ${teamId}`,
         agents: [agent],
       });
     }
   }
 
   return Array.from(groups.values());
+}
+
+function coordinationGroupId(agent: Pick<UiAgentRuntime, "team" | "subteam">): string {
+  return agent.subteam ?? agent.team ?? "";
 }
 
 function RosterHead(props: {

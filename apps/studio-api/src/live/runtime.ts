@@ -5,6 +5,7 @@ import type {
   ActionResult,
   AgentConfig,
   AiChatMessage,
+  EventSeverity,
   GameEvent,
   JsonValue,
   PerceptionSnapshot as BotPerceptionSnapshot,
@@ -12,16 +13,25 @@ import type {
 } from "@mc-ai-video/contracts";
 
 import type { AgentRegistry } from "../agents/registry";
+import { DEFAULT_AGENT_ACTIONS, normalizeAgentActions } from "../agents/default-actions";
 import { createDefaultActionRegistry } from "../actions";
 import type { ActionPolicy, AiChatPublishInput } from "../actions/types";
 import type { ActionRegistry as RuntimeActionRegistry } from "../actions/registry";
 import { createPerceptionSnapshot } from "../bots/perception";
 import type { BotBlock, BotEntity, BotHandle } from "../bots/types";
+import {
+  BlueprintRegistry,
+  CompetitiveTeamOrchestrator,
+  LLMRequestQueue,
+  LLMResponseSchema,
+  TeamMemory,
+  type TeamMemorySnapshot,
+} from "../competitive";
 import { recipeKnowledgeMemories } from "../crafting/knowledge";
 import type { StudioEventBus } from "../events/bus";
-import { AgentDecisionService } from "../llm/decisions/service";
+import { AgentDecisionService, type AgentDecisionServiceResult } from "../llm/decisions/service";
 import { allowedDecisionActionsForAgent } from "../llm/decisions/intent-map";
-import { createDefaultLlmProviderRegistry } from "../llm/providers";
+import { createDefaultLlmProviderRegistry, type LlmProviderRegistry } from "../llm/providers";
 import type { AgentDecision } from "../llm/schemas/agent-decision";
 import type { PromptPerceptionSnapshot, StaticPersona } from "../llm/prompts";
 import type {
@@ -45,21 +55,9 @@ import { TeamGoalController } from "./team-goal-controller";
 const MAX_RECENT_EVENTS = 50;
 const MAX_RECENT_CHAT = 30;
 const DEFAULT_MODEL = "deepseek-chat";
-const DEFAULT_LIVE_AGENT_ACTIONS = [
-  "idle",
-  "continue_routine",
-  "move_to",
-  "follow_player",
-  "flee",
-  "mine_block",
-  "collect_item",
-  "craft_item",
-  "place_block",
-  "attack_entity",
-  "chat_public",
-  "chat_ai_private",
-];
-
+const MAX_AUTONOMOUS_COLLECT_DISTANCE = 12;
+const USEFUL_DROP_PATTERN =
+  /seed|wheat|carrot|potato|apple|bread|beef|pork|chicken|mutton|log|wood|planks|stick|cobblestone|stone|ore|ingot|coal|torch|tool|sword|pickaxe|axe|shovel|hoe/i;
 export interface LiveAgentRuntimeOptions {
   agents: AgentConfig[];
   registry: AgentRegistry;
@@ -75,12 +73,26 @@ export interface LiveAgentRuntime {
   start(): void;
   stop(): Promise<void>;
   scheduler: AgentScheduler;
+  competitive: LiveCompetitiveRuntime;
+}
+
+export interface LiveCompetitiveRuntime {
+  snapshot(teamId: string): TeamMemorySnapshot | undefined;
+  snapshots(): TeamMemorySnapshot[];
 }
 
 export function createLiveAgentRuntime(options: LiveAgentRuntimeOptions): LiveAgentRuntime {
   const subteams = new SubteamDirectory(options.agents);
   const context = new LiveContext(subteams, options.agents);
   const teamMemory = new TeamMemoryStore({ subteams });
+  const coordination = new RuntimeCoordinationMessages(options.eventBus, subteams);
+  const llmProviders = createDefaultLlmProviderRegistry();
+  const competitive = new CompetitiveLiveCoordinator({
+    agents: options.agents,
+    subteams,
+    registry: options.registry,
+    providers: llmProviders,
+  });
   const teamGoals = new TeamGoalController({
     subteams,
     getBot: (agentId) => options.registry.getBot(agentId),
@@ -99,10 +111,22 @@ export function createLiveAgentRuntime(options: LiveAgentRuntimeOptions): LiveAg
     routines,
     perception: new LivePerceptionProvider(options.registry, context, teamMemory),
     actions,
-    planner: new LiveDecisionPlanner(options.registry, context, subteams, routines, teamGoals, teamMemory, options.agents),
+    planner: new LiveDecisionPlanner(
+      options.registry,
+      context,
+      subteams,
+      routines,
+      teamGoals,
+      teamMemory,
+      options.agents,
+      llmProviders,
+      competitive,
+      coordination,
+    ),
     events: {
       publish(event) {
         logSchedulerEvent(event);
+        emitSchedulerTraceEvent(options.eventBus, event);
       },
     },
     config: {
@@ -111,6 +135,10 @@ export function createLiveAgentRuntime(options: LiveAgentRuntimeOptions): LiveAg
       planningCooldownMs: options.planningCooldownMs,
     },
   });
+  const briefedTeamTasks = new Set<string>();
+  const emitSubteamBriefing = (subteamId: string, task: string, topic: "leader-briefing" | "subteam-task") => {
+    emitAiSubteamBriefing(options.eventBus, subteams, briefedTeamTasks, subteamId, task, topic);
+  };
 
   const unsubscribers = [
     options.eventBus.subscribe("game.event", (event) => {
@@ -119,18 +147,40 @@ export function createLiveAgentRuntime(options: LiveAgentRuntimeOptions): LiveAg
       if (chat) {
         context.addChat(chat);
       }
+      const briefingTask = briefingTaskFromDirectorEvent(event);
+      if (briefingTask) {
+        for (const subteamId of subteamIdsForDirectorEvent(event, subteams)) {
+          emitSubteamBriefing(subteamId, briefingTask, "leader-briefing");
+        }
+      }
       for (const wakeEvent of wakeEventsFromGameEvent(event, options.agents)) {
         scheduler.handleEvent(wakeEvent);
       }
     }),
     options.eventBus.subscribe("chat.message", (message) => {
       context.addChat(message);
+      const briefingTask = briefingTaskFromDirectorChat(message);
+      if (briefingTask) {
+        for (const subteamId of subteamIdsForChatMessage(message, subteams)) {
+          context.setSubteamTask(subteamId, briefingTask);
+          emitSubteamBriefing(subteamId, briefingTask, "leader-briefing");
+          for (const agentId of context.agentIdsForSubteam(subteamId)) {
+            scheduler.queuePlanning(agentId, { type: "direct_mention" });
+          }
+        }
+      }
       for (const recipientId of message.recipientIds) {
         scheduler.queuePlanning(recipientId, { type: "direct_mention" });
       }
     }),
     options.eventBus.subscribe("action.result", (result) => {
       teamGoals.recordActionResult(result);
+      competitive.recordActionResult(result);
+      if (!result.ok) {
+        coordination.blocked(result.agentId, result.error ?? `${result.action} failed`);
+      } else if (context.hasActiveGoal(result.agentId)) {
+        coordination.completed(result.agentId, result.action);
+      }
       if (context.hasActiveGoal(result.agentId)) {
         scheduler.queuePlanning(result.agentId, { type: "manual" });
       }
@@ -141,9 +191,9 @@ export function createLiveAgentRuntime(options: LiveAgentRuntimeOptions): LiveAg
       } else if (command.type === "pause-agent" && command.targetAgentId) {
         scheduler.pauseAgent(command.targetAgentId);
       } else if (command.type === "resume-all") {
-        for (const agentId of scheduler.agentIds()) scheduler.queuePlanning(agentId);
+        for (const agentId of scheduler.agentIds()) scheduler.resumeAgent(agentId);
       } else if (command.type === "resume-agent" && command.targetAgentId) {
-        scheduler.queuePlanning(command.targetAgentId);
+        scheduler.resumeAgent(command.targetAgentId);
       } else if (command.type === "set-agent-role" && command.targetAgentId) {
         context.setAgentRole(command.targetAgentId, stringPayload(command.payload.role) ?? stringPayload(command.payload.text) ?? "");
         scheduler.queuePlanning(command.targetAgentId, { type: "manual" });
@@ -161,6 +211,11 @@ export function createLiveAgentRuntime(options: LiveAgentRuntimeOptions): LiveAg
             subteamId,
             stringPayload(command.payload.task) ?? stringPayload(command.payload.text) ?? "",
             stringPayload(command.payload.taskId),
+          );
+          emitSubteamBriefing(
+            subteamId,
+            stringPayload(command.payload.task) ?? stringPayload(command.payload.text) ?? "",
+            "subteam-task",
           );
           for (const agentId of context.agentIdsForSubteam(subteamId)) {
             scheduler.queuePlanning(agentId, { type: "manual" });
@@ -198,6 +253,7 @@ export function createLiveAgentRuntime(options: LiveAgentRuntimeOptions): LiveAg
             context,
             subteams,
             actions,
+            competitive,
             connectAgent: options.connectAgent,
           });
         }
@@ -210,6 +266,7 @@ export function createLiveAgentRuntime(options: LiveAgentRuntimeOptions): LiveAg
 
   return {
     scheduler,
+    competitive,
     start() {
       if (interval) return;
       interval = setInterval(() => {
@@ -271,7 +328,7 @@ class LiveContext {
 
     const content = stringPayload(event.payload.content) ?? stringPayload(event.payload.message);
     if (content && isDirectorMessageEvent(event)) {
-      this.setInstruction(content);
+      this.setInstruction(content, { assignToSubteams: event.type !== "player_chat" });
     }
   }
 
@@ -309,6 +366,16 @@ class LiveContext {
   teamGoal(agentId: string): string | undefined {
     const team = this.subteams.teamForAgent(agentId);
     return team ? this.subteamTasks.get(team.id)?.task ?? this.currentInstruction : this.currentInstruction;
+  }
+
+  objectiveCandidatesForAgent(agentId: string): string[] {
+    const team = this.subteams.teamForAgent(agentId);
+    return uniqueStrings([
+      this.agentTask(agentId),
+      team ? this.subteamTasks.get(team.id)?.task : undefined,
+      this.currentInstruction,
+      ...[...this.subteamTasks.values()].map((task) => task.task),
+    ]);
   }
 
   hasActiveGoal(agentId: string): boolean {
@@ -415,11 +482,73 @@ class LiveContext {
     return this.agents.map((agent) => agent.id).filter((id) => id !== agentId);
   }
 
-  private setInstruction(content: string): void {
+  private setInstruction(content: string, options: { assignToSubteams?: boolean } = {}): void {
     this.currentInstruction = content;
+    if (options.assignToSubteams === false) return;
     for (const team of this.subteams.list()) {
       this.subteamTasks.set(team.id, { task: content });
     }
+  }
+}
+
+class RuntimeCoordinationMessages {
+  private readonly sentAt = new Map<string, number>();
+  private readonly now: () => number;
+
+  constructor(
+    private readonly eventBus: StudioEventBus,
+    private readonly subteams: SubteamDirectory,
+    now?: () => number,
+  ) {
+    this.now = now ?? Date.now;
+  }
+
+  danger(agentId: string, content: string): void {
+    this.emit(agentId, "danger", content, 4, 20_000);
+  }
+
+  blocked(agentId: string, reason: string): void {
+    this.emit(agentId, "blocked", `Blocked: ${clampMessage(reason)}. Trying another plan.`, 3, 30_000);
+  }
+
+  fallback(agentId: string, reason: string): void {
+    this.emit(agentId, "fallback", `Fallback: ${clampMessage(reason)}.`, 2, 30_000);
+  }
+
+  completed(agentId: string, action: string): void {
+    if (!["craft_item", "place_block", "mine_block", "collect_item", "attack_entity"].includes(action)) {
+      return;
+    }
+    this.emit(agentId, "progress", `Finished ${action.replace(/_/g, " ")}; continuing team goal.`, 2, 60_000);
+  }
+
+  private emit(
+    agentId: string,
+    topic: string,
+    content: string,
+    urgency: EventSeverity,
+    cooldownMs: number,
+  ): void {
+    const recipientIds = this.subteams.resolveRecipients(agentId, {});
+    if (recipientIds.length === 0) return;
+
+    const key = `${agentId}:${topic}:${normalizeTaskText(content)}`;
+    const now = this.now();
+    if (now - (this.sentAt.get(key) ?? 0) < cooldownMs) {
+      return;
+    }
+    this.sentAt.set(key, now);
+
+    this.eventBus.emit("chat.message", {
+      id: randomUUID(),
+      senderId: agentId,
+      recipientIds,
+      topic,
+      urgency,
+      visibility: "ai",
+      content,
+      timestamp: new Date(now).toISOString(),
+    });
   }
 }
 
@@ -440,8 +569,260 @@ class LivePerceptionProvider implements PerceptionProvider {
   }
 }
 
+interface CompetitiveLiveCoordinatorOptions {
+  agents: AgentConfig[];
+  subteams: SubteamDirectory;
+  registry: AgentRegistry;
+  providers: LlmProviderRegistry;
+  now?: () => number;
+}
+
+interface CompetitivePlanInput {
+  agent: AgentConfig;
+  perception: RoutinePerceptionSnapshot;
+  goal?: string;
+}
+
+class CompetitiveLiveCoordinator implements LiveCompetitiveRuntime {
+  private readonly agentsById = new Map<string, AgentConfig>();
+  private readonly memories = new Map<string, TeamMemory>();
+  private readonly orchestrators = new Map<string, CompetitiveTeamOrchestrator>();
+  private readonly blueprintRegistry = BlueprintRegistry.withDefaults();
+  private readonly llmQueue = new LLMRequestQueue({
+    minDelayMs: readIntegerEnv("LIVE_COMPETITIVE_LLM_MIN_DELAY_MS", 200),
+    maxDelayMs: readIntegerEnv("LIVE_COMPETITIVE_LLM_MAX_DELAY_MS", 500),
+  });
+  private readonly pendingBlueprintByAgentId = new Map<string, string>();
+  private readonly now: () => number;
+
+  constructor(private readonly options: CompetitiveLiveCoordinatorOptions) {
+    this.now = options.now ?? Date.now;
+    for (const agent of options.agents) this.addAgent(agent);
+  }
+
+  addAgent(agent: AgentConfig): void {
+    this.agentsById.set(agent.id, agent);
+  }
+
+  plan(input: CompetitivePlanInput): { handled: boolean; action?: RoutineActionIntent; note?: string } {
+    const goal = input.goal?.trim();
+    if (!isCompetitiveObjective(goal)) {
+      return { handled: false };
+    }
+
+    const team = this.options.subteams.teamForAgent(input.agent.id);
+    if (!team) return { handled: false };
+
+    const memory = this.memoryForTeam(team.id, team.memberIds);
+    this.syncTeamResources(memory, team.memberIds);
+    this.syncTeamGear(memory, team.memberIds);
+    this.syncThreat(memory, input.agent, input.perception);
+
+    const bot = this.options.registry.getBot(input.agent.id);
+    const capableAgent: AgentConfig = {
+      ...input.agent,
+      allowedActions: availableLiveActions(input.agent, bot),
+    };
+    const orchestrator = this.orchestratorForTeam(team.id, memory);
+    const action = orchestrator.planNextAction({
+      agent: capableAgent,
+      bot,
+      perception: input.perception,
+    });
+    if (!action) {
+      return {
+        handled: false,
+        note: "competitive objective active but no deterministic action is currently available",
+      };
+    }
+
+    this.recordPlannedAction(input.agent.id, action);
+    return {
+      handled: true,
+      action,
+      note: `competitive ${memory.currentPhase()} ${memory.roleFor(input.agent.id)}`,
+    };
+  }
+
+  recordActionResult(result: ActionResult): void {
+    if (result.action !== "place_block") return;
+
+    const blueprintId = this.pendingBlueprintByAgentId.get(result.agentId);
+    this.pendingBlueprintByAgentId.delete(result.agentId);
+    if (!result.ok || !blueprintId) return;
+
+    const team = this.options.subteams.teamForAgent(result.agentId);
+    if (!team) return;
+    const memory = this.memories.get(team.id);
+    if (!memory) return;
+
+    memory.recordBlueprintPlacement(result.agentId, blueprintId);
+  }
+
+  snapshot(teamId: string): TeamMemorySnapshot | undefined {
+    return this.memories.get(teamId)?.snapshot();
+  }
+
+  snapshots(): TeamMemorySnapshot[] {
+    return [...this.memories.values()]
+      .map((memory) => memory.snapshot())
+      .sort((left, right) => left.teamId.localeCompare(right.teamId));
+  }
+
+  private memoryForTeam(teamId: string, memberIds: string[]): TeamMemory {
+    const existing = this.memories.get(teamId);
+    if (existing) return existing;
+
+    const memory = new TeamMemory({
+      teamId,
+      agentIds: memberIds,
+      blueprints: this.blueprintsForTeam(teamId),
+      now: this.now,
+    });
+    this.memories.set(teamId, memory);
+    return memory;
+  }
+
+  private orchestratorForTeam(teamId: string, memory: TeamMemory): CompetitiveTeamOrchestrator {
+    const existing = this.orchestrators.get(teamId);
+    if (existing) return existing;
+
+    const orchestrator = new CompetitiveTeamOrchestrator({
+      memory,
+      llmQueue: this.llmQueue,
+      buildLlmRequest: (eventName, agentIds) => this.buildLlmRequest(teamId, memory, eventName, agentIds),
+    });
+    this.orchestrators.set(teamId, orchestrator);
+    return orchestrator;
+  }
+
+  private blueprintsForTeam(teamId: string) {
+    return this.blueprintRegistry.createVillagePlan(
+      {
+        residential: readIntegerEnv("LIVE_COMPETITIVE_RESIDENTIAL_COUNT", 2),
+        farm: readIntegerEnv("LIVE_COMPETITIVE_FARM_COUNT", 1),
+        blacksmith: readIntegerEnv("LIVE_COMPETITIVE_BLACKSMITH_COUNT", 1),
+        watchtower: readIntegerEnv("LIVE_COMPETITIVE_WATCHTOWER_COUNT", 1),
+      },
+      seededRandom(teamId),
+    );
+  }
+
+  private syncTeamResources(memory: TeamMemory, memberIds: string[]): void {
+    const totals = new Map<string, number>();
+    for (const agentId of memberIds) {
+      for (const item of this.options.registry.getBot(agentId)?.inventory?.items() ?? []) {
+        totals.set(item.name, (totals.get(item.name) ?? 0) + item.count);
+      }
+    }
+
+    const tracked = new Set([
+      ...Object.keys(memory.snapshot().sharedResources),
+      ...memory.materialDeficits().keys(),
+      ...totals.keys(),
+    ]);
+
+    for (const item of tracked) {
+      memory.setSharedResource(item, totals.get(item) ?? 0);
+    }
+  }
+
+  private syncTeamGear(memory: TeamMemory, memberIds: string[]): void {
+    for (const agentId of memberIds) {
+      const gear = (this.options.registry.getBot(agentId)?.inventory?.items() ?? [])
+        .map((item) => item.name)
+        .filter((name) => /sword|shield|bow|crossbow|helmet|chestplate|leggings|boots|axe/i.test(name));
+      if (gear.length > 0) memory.assignGear(agentId, gear);
+    }
+  }
+
+  private syncThreat(
+    memory: TeamMemory,
+    agent: AgentConfig,
+    perception: RoutinePerceptionSnapshot,
+  ): void {
+    const protectedUsernames = new Set([...this.agentsById.values()].map((item) => item.account.username.toLowerCase()));
+    const visibleHuman = perception.nearbyPlayers.find((player) =>
+      player.name.toLowerCase() !== agent.account.username.toLowerCase()
+      && player.protected !== true
+      && !protectedUsernames.has(player.name.toLowerCase()),
+    );
+    if (!visibleHuman) return;
+
+    const bot = this.options.registry.getBot(agent.id);
+    const entity = Object.values(bot?.entities ?? {}).find((candidate) =>
+      candidate.type === "player"
+      && candidate.username?.toLowerCase() === visibleHuman.name.toLowerCase()
+      && candidate.position,
+    );
+    const position = toPosition(entity?.position);
+    if (!position) return;
+
+    memory.spotPlayer(position, visibleHuman.threatening ? "high" : "medium", visibleHuman.name);
+  }
+
+  private recordPlannedAction(agentId: string, action: RoutineActionIntent): void {
+    const blueprintId = stringParam(action.params.blueprintId);
+    if (action.action === "place_block" && blueprintId) {
+      this.pendingBlueprintByAgentId.set(agentId, blueprintId);
+      return;
+    }
+    this.pendingBlueprintByAgentId.delete(agentId);
+  }
+
+  private buildLlmRequest(
+    teamId: string,
+    memory: TeamMemory,
+    eventName: string,
+    agentIds: string[],
+  ) {
+    const plannerAgent = this.plannerAgent(agentIds);
+    if (!plannerAgent) return undefined;
+    const snapshot = memory.snapshot();
+    return {
+      agentId: plannerAgent.id,
+      reason: eventName,
+      execute: async () => {
+        const result = await this.options.providers.generateStructured({
+          provider: plannerAgent.providerRef || "deepseek",
+          model: process.env.DEEPSEEK_MODEL ?? DEFAULT_MODEL,
+          system: "You are a Minecraft competitive team strategist. Return strict JSON only.",
+          messages: [{
+            role: "user",
+            content: [
+              `Team ${teamId} major event: ${eventName}.`,
+              "Return exactly {\"nextBestAction\":\"...\",\"targetCoordinates\":[x,y,z]}.",
+              "Keep the action high level; deterministic Mineflayer routines will execute movement, building, and combat.",
+              `Snapshot: ${JSON.stringify(snapshot).slice(0, 3_000)}`,
+            ].join("\n"),
+          }],
+          schemaName: "CompetitiveTeamDecision",
+          temperature: 0.2,
+          timeoutMs: readIntegerEnv("LIVE_COMPETITIVE_LLM_TIMEOUT_MS", 8_000),
+        }, LLMResponseSchema);
+
+        if (!result.ok) {
+          throw new Error(`${result.error.code}: ${result.error.message}`);
+        }
+        return result.value;
+      },
+    };
+  }
+
+  private plannerAgent(agentIds: string[]): AgentConfig | undefined {
+    const candidates = agentIds
+      .map((agentId) => this.agentsById.get(agentId))
+      .filter((agent): agent is AgentConfig => Boolean(agent))
+      .sort((left, right) =>
+        Number(right.leader === true) - Number(left.leader === true)
+        || left.id.localeCompare(right.id),
+      );
+    return candidates[0];
+  }
+}
+
 class LiveDecisionPlanner implements DecisionPlanner {
-  private readonly decisions = new AgentDecisionService(createDefaultLlmProviderRegistry());
+  private readonly decisions: AgentDecisionService;
   private readonly scoutTargets = new Map<string, Position>();
 
   constructor(
@@ -452,7 +833,12 @@ class LiveDecisionPlanner implements DecisionPlanner {
     private readonly teamGoals: TeamGoalController,
     private readonly teamMemory: TeamMemoryStore,
     private readonly agents: AgentConfig[],
-  ) {}
+    providers: LlmProviderRegistry,
+    private readonly competitive: CompetitiveLiveCoordinator,
+    private readonly coordination: RuntimeCoordinationMessages,
+  ) {
+    this.decisions = new AgentDecisionService(providers);
+  }
 
   async plan(
     agent: AgentConfig,
@@ -469,11 +855,21 @@ class LiveDecisionPlanner implements DecisionPlanner {
         })
       : undefined;
     const activeGoal = this.context.teamGoal(agent.id);
-    const currentTask = reason.event
+    const assignedTask = this.context.agentTask(agent.id);
+    const eventTask = reason.event
       ? `${reason.type}: ${eventText(reason.event)}`
-      : this.context.agentTask(agent.id) ?? activeGoal;
+      : undefined;
+    const currentTask = eventTask ?? assignedTask ?? activeGoal;
+    const objectiveTask = assignedTask ?? activeGoal ?? currentTask;
+    const competitiveGoal = this.context.objectiveCandidatesForAgent(agent.id).find(isCompetitiveObjective) ?? objectiveTask;
+    const fallbackNotes: string[] = [];
     const survivalIntent = this.survivalThreatIntent(agent, perception);
     if (survivalIntent) {
+      const target = stringParam(survivalIntent.params.entityType) ?? stringParam(survivalIntent.params.entityId) ?? "hostile";
+      this.coordination.danger(
+        agent.id,
+        `${target} nearby; ${survivalIntent.action === "flee" ? "falling back" : "engaging"}.`,
+      );
       console.log(`[live-plan] ${agent.id} ${survivalIntent.action}: deterministic survival/threat response`);
       return {
         action: survivalIntent,
@@ -481,15 +877,46 @@ class LiveDecisionPlanner implements DecisionPlanner {
       };
     }
 
+    const opportunisticIntent = this.opportunisticCollectIntent(agent, perception, bot);
+    if (opportunisticIntent) {
+      console.log(`[live-plan] ${agent.id} ${opportunisticIntent.action}: deterministic useful-drop collection`);
+      return {
+        action: opportunisticIntent,
+        note: "deterministic useful-drop collection",
+      };
+    }
+
+    const competitiveIntent = this.competitive.plan({
+      agent,
+      perception,
+      goal: competitiveGoal,
+    });
+    if (competitiveIntent.handled) {
+      console.log(
+        competitiveIntent.action
+          ? `[live-plan] ${agent.id} ${competitiveIntent.action.action}: ${competitiveIntent.note ?? "competitive orchestration"}`
+          : `[live-plan] ${agent.id} no action: ${competitiveIntent.note ?? "competitive orchestration"}`,
+      );
+      return competitiveIntent;
+    }
+    if (competitiveIntent.note) {
+      fallbackNotes.push(competitiveIntent.note);
+    }
+
     const teamIntent = this.teamGoals.plan({
       agent,
       perception,
-      goal: currentTask,
+      goal: objectiveTask,
       attackTargetUsername: this.context.attackTargetUsername(),
     });
     if (teamIntent.action) {
       console.log(`[live-plan] ${agent.id} ${teamIntent.action.action}: ${teamIntent.note ?? "team autonomy"}`);
       return teamIntent;
+    }
+    if (teamIntent.note) {
+      fallbackNotes.push(teamIntent.note);
+      this.coordination.blocked(agent.id, teamIntent.note);
+      console.log(`[live-plan] ${agent.id} fallback: ${teamIntent.note}; trying LLM decision`);
     }
 
     const result = await this.decisions.decide({
@@ -568,14 +995,22 @@ class LiveDecisionPlanner implements DecisionPlanner {
       maxContextChars: 4_000,
     });
 
+    logLlmDecisionTrace(agent, result);
+
     const intent = this.decisionToIntent(agent, perception, result.decision);
+    const fallbackReason = result.fallbackReason ? ` reason=${result.fallbackReason}` : "";
+    const usage = formatLlmUsage(result.usage);
+    if (result.fallback) {
+      this.coordination.fallback(agent.id, result.fallbackReason ?? result.decision.reasoningSummary);
+    }
     console.log(
       `[live-plan] ${agent.id} ${result.decision.action}`
-        + `${result.fallback ? " fallback" : ""}: ${result.decision.reasoningSummary}`,
+        + `${result.fallback ? ` fallback${fallbackReason}` : ""}: ${result.decision.reasoningSummary}`
+        + `${usage ? ` ${usage}` : ""}`,
     );
     return {
       action: intent,
-      note: result.decision.reasoningSummary,
+      note: [...fallbackNotes, result.decision.reasoningSummary].join(" | "),
     };
   }
 
@@ -603,6 +1038,34 @@ class LiveDecisionPlanner implements DecisionPlanner {
       };
     }
     return undefined;
+  }
+
+  private opportunisticCollectIntent(
+    agent: AgentConfig,
+    perception: RoutinePerceptionSnapshot,
+    bot: BotHandle | undefined,
+  ): RoutineActionIntent | undefined {
+    if (!agent.allowedActions.includes("collect_item") || !bot?.collectBlock) {
+      return undefined;
+    }
+    if (perception.nearbyEntities.some((entity) => entity.hostile)) {
+      return undefined;
+    }
+    const current = toPosition(bot.entity?.position);
+    const item = perception.nearbyEntities.find((entity) => isAutonomousCollectTarget(entity, current));
+    if (!item) {
+      return undefined;
+    }
+    return {
+      action: "collect_item",
+      params: {
+        entityId: item.id,
+        item: item.type,
+        reason: "collecting useful nearby dropped item before planning",
+      },
+      timeoutMs: 10_000,
+      requestedBy: "live-survival",
+    };
   }
 
   private decisionToIntent(
@@ -877,7 +1340,7 @@ class LiveDecisionPlanner implements DecisionPlanner {
       && block.safe !== false
       && block.belowAgent !== true,
     );
-    if ((role.includes("miner") || role.includes("builder")) && blockToMine && agent.allowedActions.includes("mine_block")) {
+    if (blockToMine && agent.allowedActions.includes("mine_block")) {
       return {
         action: "mine_block",
         params: { position: blockToMine.position, block: blockToMine.type, reason: "gathering village/base materials" },
@@ -887,15 +1350,11 @@ class LiveDecisionPlanner implements DecisionPlanner {
     }
 
     const current = toPosition(bot?.entity?.position);
-    const item = perception.nearbyEntities.find((entity) =>
-      entity.type === "item"
-      && entity.id
-      && (!current || !entity.position || positionDistance(current, entity.position) <= 96),
-    );
+    const item = perception.nearbyEntities.find((entity) => isAutonomousCollectTarget(entity, current));
     if (item && agent.allowedActions.includes("collect_item")) {
       return {
         action: "collect_item",
-        params: { entityId: item.id, reason: "collecting supplies for team goal" },
+        params: { entityId: item.id, item: item.type, reason: "collecting supplies for team goal" },
         timeoutMs: 10_000,
         requestedBy: "live-goal",
       };
@@ -972,10 +1431,15 @@ class LiveSchedulerActions implements SchedulerActionRegistry {
 
   canRun(agent: AgentConfig, request: ActionRequest): boolean {
     const action = this.actions.get(request.action);
-    if (!action) return false;
+    if (!action) {
+      return this.rejectPreflight(agent, request, `unknown action: ${request.action}`);
+    }
+    if (!agent.allowedActions.includes(action.name)) {
+      return this.rejectPreflight(agent, request, `action not allowed for agent: ${action.name}`);
+    }
     const result = action.canRun(this.context(agent), request);
     if (!result.ok) {
-      console.warn(`[live-action] ${agent.id}:${request.action} rejected: ${result.reason}`);
+      return this.rejectPreflight(agent, request, result.reason);
     }
     return result.ok;
   }
@@ -1012,6 +1476,21 @@ class LiveSchedulerActions implements SchedulerActionRegistry {
       policy: this.policy,
     };
   }
+
+  private rejectPreflight(agent: AgentConfig, request: ActionRequest, reason: string): false {
+    console.warn(`[live-action] ${agent.id}:${request.action} rejected: ${reason}`);
+    this.eventBus.emit("action.result", {
+      requestId: request.id,
+      agentId: agent.id,
+      action: request.action,
+      ok: false,
+      startedAt: request.createdAt,
+      completedAt: new Date().toISOString(),
+      error: reason,
+      data: { status: "rejected" },
+    });
+    return false;
+  }
 }
 
 function addRuntimeAgent(
@@ -1022,6 +1501,7 @@ function addRuntimeAgent(
     context: LiveContext;
     subteams: SubteamDirectory;
     actions: LiveSchedulerActions;
+    competitive: CompetitiveLiveCoordinator;
     connectAgent?: (agent: AgentConfig) => Promise<void>;
   },
 ): void {
@@ -1032,6 +1512,7 @@ function addRuntimeAgent(
   deps.subteams.addAgent(agent);
   deps.scheduler.addAgent(agent);
   deps.actions.addAgent(agent);
+  deps.competitive.addAgent(agent);
 
   if (deps.connectAgent) {
     deps.connectAgent(agent).catch((error: unknown) => {
@@ -1072,9 +1553,11 @@ function agentConfigFromPayload(value: JsonValue | undefined): AgentConfig | und
     leader: source.leader === true,
     mode: "routine",
     routine: stringPayload(source.routine),
-    allowedActions: stringArrayPayload(source.allowedActions).length > 0
-      ? stringArrayPayload(source.allowedActions)
-      : DEFAULT_LIVE_AGENT_ACTIONS,
+    allowedActions: normalizeAgentActions(
+      stringArrayPayload(source.allowedActions).length > 0
+        ? stringArrayPayload(source.allowedActions)
+        : [...DEFAULT_AGENT_ACTIONS],
+    ),
     providerRef,
     visibility: "ai",
   };
@@ -1085,7 +1568,7 @@ function wakeEventsFromGameEvent(event: GameEvent, agents: AgentConfig[]): GameE
     return [asLeaderCommand(event, agents)];
   }
   if (event.type === "player_chat") {
-    return [asLeaderCommand(event, agents)];
+    return isActionablePlayerChat(event) ? [asLeaderCommand(event, agents)] : [];
   }
   if (event.type === "player_damage") {
     return [{ ...event, type: "attacked" }];
@@ -1109,6 +1592,113 @@ function asLeaderCommand(event: GameEvent, agents: AgentConfig[]): GameEvent {
   };
 }
 
+function emitAiSubteamBriefing(
+  eventBus: StudioEventBus,
+  subteams: SubteamDirectory,
+  briefedTeamTasks: Set<string>,
+  subteamId: string,
+  task: string,
+  topic: "leader-briefing" | "subteam-task",
+): void {
+  const normalizedTask = normalizeTaskText(task);
+  if (!normalizedTask) return;
+
+  const team = subteams.list().find((candidate) => candidate.id === subteamId);
+  const senderId = team?.leaderId ?? team?.memberIds[0];
+  if (!team || !senderId) return;
+
+  const recipientIds = team.memberIds.filter((agentId) => agentId !== senderId);
+  if (recipientIds.length === 0) return;
+
+  const dedupeKey = `${subteamId}:${normalizedTask}`;
+  if (briefedTeamTasks.has(dedupeKey)) return;
+  briefedTeamTasks.add(dedupeKey);
+
+  eventBus.emit("chat.message", {
+    id: randomUUID(),
+    senderId,
+    recipientIds,
+    topic,
+    urgency: topic === "subteam-task" ? 4 : 3,
+    visibility: "ai",
+    content: briefingMessage(task, topic),
+    timestamp: new Date().toISOString(),
+  });
+}
+
+function briefingMessage(task: string, topic: "leader-briefing" | "subteam-task"): string {
+  const label = topic === "subteam-task" ? "New subteam task" : "New goal";
+  const brief = clampMessage(task).replace(/[.?!]\s*$/, "");
+  return `${label}: ${brief}. Start with your roles and report blockers here.`;
+}
+
+function briefingTaskFromDirectorEvent(event: GameEvent): string | undefined {
+  const content = stringPayload(event.payload.content) ?? stringPayload(event.payload.message);
+  if (!content) return undefined;
+  if (event.type === "chat.leader_command") return content;
+  if (
+    (event.type === "ai_private_chat" || event.type === "human_team_chat")
+    && event.visibility !== "public"
+    && isActionableInstructionText(content, stringPayload(event.payload.channel))
+  ) {
+    return content;
+  }
+  return undefined;
+}
+
+function briefingTaskFromDirectorChat(message: AiChatMessage): string | undefined {
+  if (message.senderId.toLowerCase() !== "director" || message.visibility === "public") {
+    return undefined;
+  }
+  return isActionableInstructionText(message.content, message.topic) ? message.content.trim() : undefined;
+}
+
+function subteamIdsForDirectorEvent(event: GameEvent, subteams: SubteamDirectory): string[] {
+  const explicitSubteams = uniqueStrings([
+    stringPayload(event.payload.subteamId),
+    ...stringArrayPayload(event.payload.subteamIds),
+    ...stringArrayPayload(event.payload.subteams),
+  ]);
+  if (explicitSubteams.length > 0) {
+    return knownSubteamIds(explicitSubteams, subteams);
+  }
+
+  const agentIds = uniqueStrings([
+    ...stringArrayPayload(event.payload.recipientIds),
+    ...stringArrayPayload(event.payload.agentIds),
+    ...stringArrayPayload(event.payload.mentionedAgentIds),
+  ]);
+  if (agentIds.length > 0) {
+    return subteamIdsForAgentIds(agentIds, subteams);
+  }
+
+  return subteams.list().map((team) => team.id);
+}
+
+function subteamIdsForChatMessage(message: AiChatMessage, subteams: SubteamDirectory): string[] {
+  if (message.recipientIds.length > 0) {
+    return subteamIdsForAgentIds(message.recipientIds, subteams);
+  }
+  return subteams.list().map((team) => team.id);
+}
+
+function subteamIdsForAgentIds(agentIds: string[], subteams: SubteamDirectory): string[] {
+  return uniqueStrings(agentIds.map((agentId) => subteams.teamForAgent(agentId)?.id));
+}
+
+function knownSubteamIds(subteamIds: string[], subteams: SubteamDirectory): string[] {
+  const known = new Set(subteams.list().map((team) => team.id));
+  return subteamIds.filter((subteamId) => known.has(subteamId));
+}
+
+function isActionableInstructionText(content: string, topic?: string): boolean {
+  if (topic && /\b(task|goal|objective|scenario|brief|assignment|launch|mission)\b/i.test(topic)) {
+    return true;
+  }
+  return /\b(follow|come|go|move|build|mine|collect|craft|attack|kill|hunt|guard|protect|help|retreat|stop|resume|start|find|scout|patrol|prepare|survive|win|wins|village|base|camp|house|objective|scenario|task)\b/i
+    .test(content);
+}
+
 function chatFromGameEvent(event: GameEvent, agents: AgentConfig[]): AiChatMessage | undefined {
   const content = stringPayload(event.payload.content) ?? stringPayload(event.payload.message);
   if (!content || !isDirectorMessageEvent(event)) {
@@ -1128,8 +1718,28 @@ function chatFromGameEvent(event: GameEvent, agents: AgentConfig[]): AiChatMessa
 function isDirectorMessageEvent(event: GameEvent): boolean {
   return event.type === "ai_private_chat"
     || event.type === "human_team_chat"
-    || event.type === "player_chat"
+    || (event.type === "player_chat" && isActionablePlayerChat(event))
     || event.type === "chat.leader_command";
+}
+
+function isActionablePlayerChat(event: GameEvent): boolean {
+  const content = (stringPayload(event.payload.content) ?? stringPayload(event.payload.message) ?? "").trim();
+  if (!content) return false;
+  if (
+    stringArrayPayload(event.payload.agentIds).length > 0
+    || stringArrayPayload(event.payload.recipientIds).length > 0
+    || stringArrayPayload(event.payload.mentionedAgentIds).length > 0
+  ) {
+    return true;
+  }
+
+  const normalized = content.toLowerCase();
+  if (/^[!/]/.test(normalized)) return true;
+  if (/^(help|come|follow|stop|run|retreat|attack|build|mine|guard|protect)\b/.test(normalized)) {
+    return true;
+  }
+  return /\b(ai|agent|agents|bot|bots|team|subteam|leader|everyone)\b/.test(normalized)
+    && /\b(follow|come|go|move|build|mine|collect|craft|attack|kill|hunt|guard|protect|help|retreat|stop|resume|start|find|scout)\b/.test(normalized);
 }
 
 function routinePerceptionFromBot(
@@ -1348,6 +1958,17 @@ function isTeamMovementGoal(goal: string): boolean {
   return /\b(follow|leader|go|move|find|scout|build|village|base|camp|house|kill|attack|hunt)\b/i.test(goal);
 }
 
+function isCompetitiveObjective(goal: string | undefined): boolean {
+  if (!goal) return false;
+  const hasVillageOrCompetition = /\b(competitive|compete|first team|specified village|village)\b/i.test(goal);
+  const hasPlayerKillObjective = /\b(hunt|kill(?:s|ed|ing)?|killing blow|human player|player)\b/i.test(goal);
+  const hasTournamentKillWinCondition =
+    /\b(team|whoever|whichever|whatever|first)\b[\s\S]{0,80}\b(kill(?:s|ed|ing)?|slay(?:s|ed|ing)?|eliminate(?:s|d|ing)?)\b[\s\S]{0,80}\b(wins?|victory)\b/i.test(goal)
+    || /\b(kill(?:s|ed|ing)?|slay(?:s|ed|ing)?|eliminate(?:s|d|ing)?)\b[\s\S]{0,40}\b(me|my player|human player)\b[\s\S]{0,80}\b(wins?|victory)\b/i.test(goal);
+
+  return (hasVillageOrCompetition && hasPlayerKillObjective) || hasTournamentKillWinCondition;
+}
+
 function isAttackGoal(goal: string): boolean {
   return /\b(kill|attack|hunt|eliminate)\b/i.test(goal);
 }
@@ -1363,6 +1984,26 @@ function positionDistance(
   const dy = left.y - right.y;
   const dz = left.z - right.z;
   return Math.sqrt(dx * dx + dy * dy + dz * dz);
+}
+
+function isAutonomousCollectTarget(
+  entity: RoutinePerceptionSnapshot["nearbyEntities"][number],
+  current: Position | undefined,
+): boolean {
+  if (!entity.id || entity.hostile === true || !entity.position) {
+    return false;
+  }
+  return Boolean(entity.id)
+    && isSpecificUsefulDropType(entity.type)
+    && (!current || positionDistance(current, entity.position) <= MAX_AUTONOMOUS_COLLECT_DISTANCE);
+}
+
+function isSpecificUsefulDropType(type: string): boolean {
+  const normalized = type.trim().toLowerCase();
+  return normalized !== "item"
+    && normalized !== "object"
+    && normalized !== "dropped_item"
+    && USEFUL_DROP_PATTERN.test(normalized);
 }
 
 function nearbyBuildPosition(bot: BotHandle | undefined): Position | undefined {
@@ -1423,6 +2064,27 @@ function logSchedulerEvent(event: SchedulerEvent): void {
   }
 }
 
+function emitSchedulerTraceEvent(eventBus: StudioEventBus, event: SchedulerEvent): void {
+  const payload = event.type === "routine.task"
+    ? compactRecord({
+        ...event.payload,
+        routineId: event.routineId,
+        status: event.status,
+        message: event.message,
+      })
+    : event.payload;
+
+  eventBus.emit("game.event", {
+    id: randomUUID(),
+    type: event.type,
+    actorId: event.agentId,
+    severity: event.severity,
+    visibility: "ai",
+    payload,
+    timestamp: new Date().toISOString(),
+  });
+}
+
 function speechContent(decision: AgentDecision): string | undefined {
   return decision.speech?.content;
 }
@@ -1438,6 +2100,69 @@ function clampMessage(message: string): string {
   return trimmed.length <= 220 ? trimmed : `${trimmed.slice(0, 217)}...`;
 }
 
+function logLlmDecisionTrace(agent: AgentConfig, result: AgentDecisionServiceResult): void {
+  if (!decisionTraceEnabled()) {
+    return;
+  }
+
+  const usage = formatLlmUsage(result.usage);
+  const fallbackReason = result.fallbackReason
+    ? ` fallbackReason=${JSON.stringify(redactLogText(result.fallbackReason))}`
+    : "";
+  const rejection = result.rejection
+    ? ` rejection=${result.rejection.code}:${result.rejection.path ?? "decision"}`
+    : "";
+  console.log(
+    `[llm-decision] agent=${agent.id} provider=${result.request.provider} model=${result.request.model}`
+      + ` fallback=${result.fallback} action=${result.decision.action}`
+      + ` confidence=${result.decision.confidence.toFixed(2)}`
+      + `${usage ? ` ${usage}` : ""}`
+      + fallbackReason
+      + rejection,
+  );
+  console.log(
+    `[llm-decision] agent=${agent.id} params=${safeJson(result.decision.parameters)}`
+      + ` reasoning=${JSON.stringify(clampMessage(redactLogText(result.decision.reasoningSummary)))}`
+      + `${result.decision.speech ? ` speech=${safeJson(result.decision.speech)}` : ""}`,
+  );
+}
+
+function decisionTraceEnabled(): boolean {
+  return truthyEnv("LIVE_LLM_DEBUG") || truthyEnv("LIVE_DECISION_TRACE");
+}
+
+function truthyEnv(name: string): boolean {
+  const value = process.env[name]?.trim().toLowerCase();
+  return value === "1" || value === "true" || value === "yes" || value === "on";
+}
+
+function formatLlmUsage(usage: AgentDecisionServiceResult["usage"]): string {
+  if (!usage) {
+    return "";
+  }
+  const parts = [
+    usage.inputTokens !== undefined ? `input=${usage.inputTokens}` : undefined,
+    usage.outputTokens !== undefined ? `output=${usage.outputTokens}` : undefined,
+    usage.cacheHitInputTokens !== undefined ? `cacheHit=${usage.cacheHitInputTokens}` : undefined,
+    usage.cacheMissInputTokens !== undefined ? `cacheMiss=${usage.cacheMissInputTokens}` : undefined,
+  ].filter((part): part is string => Boolean(part));
+  return parts.length > 0 ? `usage(${parts.join(" ")})` : "";
+}
+
+function safeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value) ?? "undefined";
+  } catch {
+    return "\"[unserializable]\"";
+  }
+}
+
+function redactLogText(value: string): string {
+  return value
+    .replace(/Bearer\s+[A-Za-z0-9._~+/=-]+/gi, "Bearer [redacted]")
+    .replace(/\b(?:sk|ds)-[A-Za-z0-9._~+/=-]{12,}\b/g, "[redacted-key]");
+}
+
 function toPosition(position: BotEntity["position"] | undefined): Position | undefined {
   if (!position) return undefined;
   return { x: position.x, y: position.y, z: position.z, world: position.world };
@@ -1451,6 +2176,14 @@ function stringArrayPayload(value: JsonValue | undefined): string[] {
   return Array.isArray(value)
     ? value.filter((item): item is string => typeof item === "string" && item.length > 0)
     : [];
+}
+
+function uniqueStrings(values: Array<string | undefined>): string[] {
+  return [...new Set(values.map((value) => value?.trim()).filter((value): value is string => Boolean(value)))];
+}
+
+function normalizeTaskText(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
 function stringParam(value: unknown): string | undefined {
@@ -1504,6 +2237,17 @@ function readIntegerEnv(name: string, fallback: number): number {
   const parsed = Number(value);
   if (!Number.isInteger(parsed) || parsed <= 0) return fallback;
   return parsed;
+}
+
+function seededRandom(seedText: string): () => number {
+  let seed = 0;
+  for (let index = 0; index < seedText.length; index += 1) {
+    seed = (seed * 31 + seedText.charCodeAt(index)) >>> 0;
+  }
+  return () => {
+    seed = (1664525 * seed + 1013904223) >>> 0;
+    return seed / 0x100000000;
+  };
 }
 
 function trim<T>(values: T[], max: number): void {

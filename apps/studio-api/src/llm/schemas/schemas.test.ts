@@ -89,6 +89,20 @@ test("AgentDecision normalizes DeepSeek-style wrapped speech aliases", () => {
   assert.deepEqual(result.speech?.recipientIds, ["leader"]);
 });
 
+test("AgentDecision treats null speech as absent speech", () => {
+  const result = AgentDecisionSchema.parse({
+    intent: "ask for help",
+    action: "chat_ai_private",
+    parameters: { message: "Need help with a zombie.", recipientIds: ["guard-1"] },
+    speech: null,
+    confidence: 0.62,
+    reasoningSummary: "Ask nearby allies for help.",
+  });
+
+  assert.equal(result.speech, undefined);
+  assert.equal(result.action, "chat_ai_private");
+});
+
 test("ReflectionResult clamps relationship values to 0-100", () => {
   const result = ReflectionResultSchema.parse({
     emotionalState: "alarmed",

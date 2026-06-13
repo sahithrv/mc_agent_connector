@@ -14,6 +14,8 @@ import type {
   WakeReason,
 } from "./types";
 
+const ROUTINE_IDLE_TRACE_COOLDOWN_MS = 10_000;
+
 export class AgentScheduler {
   private readonly agents: AgentConfig[];
   private readonly states = new Map<string, RuntimeState>();
@@ -22,6 +24,7 @@ export class AgentScheduler {
   private readonly idFactory: () => string;
   private reflection?: ReflectionService;
   private pendingActionCursor = 0;
+  private readonly routineIdleTraces = new Map<string, { key: string; at: number }>();
 
   public constructor(private readonly deps: SchedulerDependencies) {
     this.agents = [...deps.agents].sort((left, right) => left.id.localeCompare(right.id));
@@ -137,8 +140,22 @@ export class AgentScheduler {
       if (!routine) continue;
 
       const perception = await this.deps.perception.snapshot(agent);
+      const survivalRoutine = this.deps.routines.get("survival");
+      if (survivalRoutine && survivalRoutine.id !== routineId) {
+        const survivalResult = survivalRoutine.run(agent, perception);
+        this.emitRoutineEvents(survivalResult.taskEvents);
+        if (survivalResult.wantsPlanning) this.queuePlanning(agent.id, { type: "manual" });
+        if (survivalResult.action) {
+          this.startOrQueueAction(agent, state, survivalResult.action);
+          continue;
+        }
+        if (survivalResult.status === "failed") {
+          continue;
+        }
+      }
+
       const result = routine.run(agent, perception);
-      result.taskEvents.forEach((event) => this.emit(event));
+      this.emitRoutineEvents(result.taskEvents);
       if (result.wantsPlanning) this.queuePlanning(agent.id, { type: "manual" });
       if (result.action) {
         this.startOrQueueAction(agent, state, result.action);
@@ -151,6 +168,16 @@ export class AgentScheduler {
     if (!state) return;
     state.publicState.mode = "paused";
     this.cancelAgent(agentId, "pause");
+  }
+
+  public resumeAgent(agentId: string, reason: WakeReason = { type: "manual" }): void {
+    const state = this.states.get(agentId);
+    if (!state || state.publicState.mode === "failed") return;
+    if (state.publicState.mode === "paused") {
+      const agent = this.agents.find((item) => item.id === agentId);
+      state.publicState.mode = agent?.mode ?? "routine";
+    }
+    this.queuePlanning(agentId, reason);
   }
 
   public disconnectAgent(agentId: string): void {
@@ -242,10 +269,12 @@ export class AgentScheduler {
     });
 
     let planningError: string | undefined;
+    let planningNote: string | undefined;
     state.planningPromise = (async () => {
       try {
         const perception = await this.deps.perception.snapshot(agent);
         const decision = await this.deps.planner.plan(agent, perception, reason, controller.signal);
+        planningNote = decision.note;
         if (decision.action) {
           this.startOrQueueAction(agent, state, decision.action);
         }
@@ -262,7 +291,7 @@ export class AgentScheduler {
           severity: planningError ? 3 : 1,
           payload: planningError
             ? { reason: reason.type, error: planningError }
-            : { reason: reason.type },
+            : { reason: reason.type, ...(planningNote ? { note: planningNote } : {}) },
         });
       }
     })();
@@ -290,6 +319,32 @@ export class AgentScheduler {
 
   private emit(event: SchedulerEvent): void {
     this.deps.events?.publish(event);
+  }
+
+  private emitRoutineEvents(events: SchedulerEvent[]): void {
+    for (const event of events) {
+      if (event.type === "routine.task" && !this.shouldEmitRoutineTask(event)) {
+        continue;
+      }
+      this.emit(event);
+    }
+  }
+
+  private shouldEmitRoutineTask(event: Extract<SchedulerEvent, { type: "routine.task" }>): boolean {
+    if (event.status !== "idle") {
+      this.routineIdleTraces.delete(event.agentId);
+      return true;
+    }
+
+    const key = `${event.routineId}:${event.message}:${String(event.payload.reason ?? event.payload.blockedReason ?? "")}`;
+    const now = this.now();
+    const previous = this.routineIdleTraces.get(event.agentId);
+    if (previous && previous.key === key && now - previous.at < ROUTINE_IDLE_TRACE_COOLDOWN_MS) {
+      return false;
+    }
+
+    this.routineIdleTraces.set(event.agentId, { key, at: now });
+    return true;
   }
 }
 

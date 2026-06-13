@@ -65,6 +65,31 @@ test("plugin event endpoint accepts signed events", async () => {
   persistence.db.close();
 });
 
+test("plugin event endpoint can read shared secret from studio config", async () => {
+  const app = createApp({
+    studioConfig: {
+      ...testConfig(),
+      plugin: { sharedSecret: "config-secret" },
+    },
+    agents: [],
+  });
+
+  const response = await app.inject({
+    method: "POST",
+    url: "/plugin/events",
+    headers: { [PLUGIN_SHARED_SECRET_HEADER]: "config-secret" },
+    payload: {
+      type: "player_join",
+      actor: { uuid: "player-uuid-1", username: "Ada" },
+      severity: 1,
+      payload: { player: "Ada" },
+    },
+  });
+
+  assert.equal(response.statusCode, 202);
+  await app.close();
+});
+
 function testConfig() {
   return {
     server: { host: "127.0.0.1", port: 0, logger: false },

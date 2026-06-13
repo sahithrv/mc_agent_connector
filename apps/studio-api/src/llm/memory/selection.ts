@@ -64,13 +64,13 @@ export function selectMemoriesForPrompt(input: SelectMemoriesInput): MemorySelec
   const maxItems = input.budget.maxItems ?? Number.POSITIVE_INFINITY;
 
   for (const item of candidates.sort(compareMemorySelectionItems)) {
-    const dedupeKey = item.id;
-    if (seen.has(dedupeKey)) continue;
+    const dedupeKeys = [`id:${item.id}`, `summary:${normalizedSummaryKey(item.summary)}`];
+    if (dedupeKeys.some((key) => seen.has(key))) continue;
 
     const nextChars = usedChars + item.summary.length;
     if (selected.length >= maxItems || nextChars > input.budget.maxChars) continue;
 
-    seen.add(dedupeKey);
+    dedupeKeys.forEach((key) => seen.add(key));
     selected.push(item);
     usedChars = nextChars;
   }
@@ -138,4 +138,13 @@ function sourceRank(source: MemorySelectionSource): number {
     case "scenario": return 2;
     case "recent": return 3;
   }
+}
+
+function normalizedSummaryKey(summary: string): string {
+  return summary
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim()
+    .replace(/\s+/g, " ")
+    .slice(0, 160);
 }

@@ -78,6 +78,9 @@ test("persona and task prompts keep contracts compact and high level", () => {
   assert.doesNotMatch(system, /health=6/);
   assert.match(decision, /AVAILABLE_ACTIONS/);
   assert.match(decision, /idle: Pause briefly/);
+  assert.match(decision, /ACTION_PARAMETER_RULES/);
+  assert.match(decision, /move_to, mine_block, and place_block require/);
+  assert.match(decision, /Use relationships and memories/);
   assert.match(reflection, /only deltas/);
   assert.match(reflection, /Do not rewrite the full static persona/);
   assert.match(leader, /under 240 characters/);

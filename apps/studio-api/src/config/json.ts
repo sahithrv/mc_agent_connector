@@ -45,6 +45,21 @@ export function requiredObject(
   return value;
 }
 
+export function optionalObject(
+  source: JsonObject,
+  field: string,
+  filePath: string,
+): JsonObject | undefined {
+  const value = source[field];
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!isRecord(value)) {
+    throw new ConfigError(`${field} must be an object when provided`, filePath);
+  }
+  return value;
+}
+
 export function requiredString(
   source: JsonObject,
   field: string,

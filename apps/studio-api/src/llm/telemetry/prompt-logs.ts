@@ -139,6 +139,10 @@ export interface DecisionLogRecord {
   selectedAction: AgentDecision["action"];
   confidence: number;
   fallback: boolean;
+  fallbackReason?: string;
+  rejectionCode?: string;
+  rejectionPath?: string;
+  rejectionMessage?: string;
   createdAt: string;
 }
 
@@ -148,6 +152,12 @@ export interface CreateDecisionLogInput {
   promptLogId?: string;
   decision: AgentDecision;
   fallback?: boolean;
+  fallbackReason?: string;
+  rejection?: {
+    code: string;
+    path?: string;
+    message: string;
+  };
   createdAt?: string;
 }
 
@@ -174,6 +184,10 @@ export class InMemoryDecisionLogRepository implements DecisionLogRepository {
       selectedAction: input.decision.action,
       confidence: input.decision.confidence,
       fallback: input.fallback ?? false,
+      fallbackReason: input.fallbackReason ? redactSecretLikeText(input.fallbackReason) : undefined,
+      rejectionCode: input.rejection?.code,
+      rejectionPath: input.rejection?.path,
+      rejectionMessage: input.rejection?.message ? redactSecretLikeText(input.rejection.message) : undefined,
       createdAt: input.createdAt ?? new Date().toISOString(),
     };
 

@@ -35,6 +35,12 @@ test("decision logs expose selected action, confidence, and fallback for dashboa
     promptLogId: "prompt-one",
     decision: decision("idle", 0.4),
     fallback: true,
+    fallbackReason: "missing_parameter: Bearer sk-testsecret1234567890",
+    rejection: {
+      code: "missing_parameter",
+      path: "parameters.position",
+      message: "move_to requires position",
+    },
     createdAt: "2026-06-10T21:00:00.000Z",
   });
   decisions.create({
@@ -46,7 +52,12 @@ test("decision logs expose selected action, confidence, and fallback for dashboa
   const listed = decisions.list({ agentId: "farmer" });
   assert.deepEqual(listed.map((item) => item.selectedAction), ["chat_ai_private", "idle"]);
   assert.equal(listed[0]?.confidence, 0.8);
-  assert.equal(decisions.list({ fallback: true })[0]?.promptLogId, "prompt-one");
+  const fallback = decisions.list({ fallback: true })[0];
+  assert.equal(fallback?.promptLogId, "prompt-one");
+  assert.equal(fallback?.rejectionCode, "missing_parameter");
+  assert.equal(fallback?.rejectionPath, "parameters.position");
+  assert.equal(fallback?.rejectionMessage, "move_to requires position");
+  assert.equal(fallback?.fallbackReason?.includes("sk-testsecret"), false);
 });
 
 test("token telemetry records usage when present and ignores missing usage", () => {

@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef } from "react";
 
+import { getAgentConfigs } from "../lib/api/agents";
 import { getHealthSnapshot } from "../lib/api/health";
 import { normalizeApiError } from "../lib/api/client";
+import { runtimeApi } from "../lib/api/runtime";
 import { shouldUseStudioMocks, startMockStudioRuntime } from "../lib/mock/runtime";
 import { createDashboardWsClient } from "../lib/ws/dashboardClient";
 import { studioStore } from "../lib/state/store";
@@ -14,9 +16,15 @@ export function useStudioRuntime(): { retryHealth: () => Promise<void> } {
     studioStore.setApiStatus({ loading: true, error: undefined });
 
     try {
-      const health = await getHealthSnapshot();
+      const [health, agents, runtime] = await Promise.all([
+        getHealthSnapshot(),
+        getAgentConfigs(),
+        runtimeApi.getStatus(),
+      ]);
       if (healthRequestIdRef.current === requestId) {
+        studioStore.setAgents(agents);
         studioStore.setHealth(health);
+        studioStore.setRuntimeStatus(runtime);
         studioStore.setApiStatus({ loading: false, lastCheckedAt: health.backend.lastCheckedAt });
       }
     } catch (error) {

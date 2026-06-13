@@ -46,7 +46,16 @@ export function createCollectItemAction(): RegisteredAction {
         return actionFailed(context.request, context.startedAt, blocked);
       }
 
-      await context.bot?.collectBlock?.collect(item);
+      try {
+        await collectWithAbort(context, item);
+      } catch (error: unknown) {
+        const message = context.signal.aborted
+          ? `collect_item canceled: ${formatAbortReason(context.signal.reason)}`
+          : formatError(error);
+        return actionFailed(context.request, context.startedAt, message, {
+          status: context.signal.aborted ? "canceled" : "failed",
+        });
+      }
       return actionSucceeded(context.request, context.startedAt, {
         entityId: String(item.id),
         item: item.name ?? "item",
@@ -114,6 +123,10 @@ function findItemEntity(context: ActionRunContext): BotEntity | undefined {
 }
 
 function validateCollect(context: ActionRunContext, item: BotEntity): string | undefined {
+  if (!item.position) {
+    return "item position is unknown";
+  }
+
   const emptySlots = context.bot?.inventory?.emptySlotCount?.();
   if (emptySlots !== undefined && emptySlots <= 0) {
     return "inventory has no empty slots";
@@ -128,6 +141,32 @@ function validateCollect(context: ActionRunContext, item: BotEntity): string | u
   }
 
   return undefined;
+}
+
+async function collectWithAbort(context: ActionRunContext, item: BotEntity): Promise<void> {
+  if (context.signal.aborted) {
+    throw new Error(formatAbortReason(context.signal.reason));
+  }
+
+  let onAbort: (() => void) | undefined;
+  const abort = new Promise<never>((_, reject) => {
+    onAbort = () => {
+      context.bot?.pathfinder?.stop?.();
+      reject(new Error(formatAbortReason(context.signal.reason)));
+    };
+    context.signal.addEventListener("abort", onAbort, { once: true });
+  });
+
+  try {
+    await Promise.race([
+      context.bot?.collectBlock?.collect(item),
+      abort,
+    ]);
+  } finally {
+    if (onAbort) {
+      context.signal.removeEventListener("abort", onAbort);
+    }
+  }
 }
 
 function validateMine(context: ActionRunContext, block: BotBlock): string | undefined {
@@ -165,4 +204,18 @@ function tooFar(
 ): boolean {
   const maxDistance = context.policy?.maxMineDistance ?? DEFAULT_MAX_MINE_DISTANCE;
   return distance(current, target) > maxDistance;
+}
+
+function formatAbortReason(reason: unknown): string {
+  if (reason instanceof Error) {
+    return reason.message;
+  }
+  if (typeof reason === "string" && reason.trim().length > 0) {
+    return reason;
+  }
+  return "action canceled";
+}
+
+function formatError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

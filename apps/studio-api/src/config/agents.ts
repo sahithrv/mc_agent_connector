@@ -2,8 +2,14 @@ import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
-import type { AgentConfig, AgentMode, Visibility } from "@mc-ai-video/contracts";
+import type {
+  AgentBehaviorSettings,
+  AgentConfig,
+  AgentMode,
+  Visibility,
+} from "@mc-ai-video/contracts";
 
+import { normalizeAgentActions } from "../agents/default-actions";
 import { ConfigError } from "./errors";
 import {
   optionalBoolean,
@@ -70,9 +76,12 @@ function parseAgentConfig(source: Record<string, unknown>, filePath: string): Ag
     team: optionalString(source, "team", filePath),
     subteam: optionalString(source, "subteam", filePath),
     leader: optionalBoolean(source, "leader", filePath),
+    enabled: optionalBoolean(source, "enabled", filePath),
+    personality: optionalString(source, "personality", filePath),
+    behavior: optionalBehavior(source, filePath),
     mode,
     routine: optionalString(source, "routine", filePath),
-    allowedActions: requiredStringArray(source, "allowedActions", filePath),
+    allowedActions: normalizeAgentActions(requiredStringArray(source, "allowedActions", filePath)),
     providerRef: requiredString(source, "providerRef", filePath),
     visibility,
   };
@@ -91,6 +100,57 @@ function assertSingleLeaderPerSubteam(agents: AgentConfig[], filePath: string): 
     }
     leaders.set(subteam, agent.id);
   }
+}
+
+function optionalBehavior(
+  source: Record<string, unknown>,
+  filePath: string,
+): AgentBehaviorSettings | undefined {
+  const value = source.behavior;
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new ConfigError("behavior must be an object when provided", filePath);
+  }
+
+  const behavior = value as Record<string, unknown>;
+  return {
+    riskTolerance: optionalBehaviorEnum(
+      behavior,
+      "riskTolerance",
+      ["low", "medium", "high"] as const,
+      filePath,
+    ),
+    teamwork: optionalBehaviorEnum(
+      behavior,
+      "teamwork",
+      ["solo", "balanced", "team-first"] as const,
+      filePath,
+    ),
+    initiative: optionalBehaviorEnum(
+      behavior,
+      "initiative",
+      ["low", "medium", "high"] as const,
+      filePath,
+    ),
+  };
+}
+
+function optionalBehaviorEnum<T extends readonly string[]>(
+  source: Record<string, unknown>,
+  field: string,
+  allowed: T,
+  filePath: string,
+): T[number] | undefined {
+  const value = source[field];
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== "string" || !allowed.includes(value)) {
+    throw new ConfigError(`behavior.${field} must be one of: ${allowed.join(", ")}`, filePath);
+  }
+  return value;
 }
 
 function requiredStringArray(

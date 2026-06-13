@@ -14,10 +14,13 @@ import {
   type StaticPersona,
 } from "../prompts";
 import { AgentDecisionSchema, type AgentDecision } from "../schemas/agent-decision";
+import {
+  validateAgentDecisionContract,
+  type DecisionRejection,
+} from "./contract";
 import { fallbackDecision } from "./fallback";
 import {
   allowedDecisionActionsForAgent,
-  isAllowedDecisionAction,
   promptActionDescriptions,
 } from "./intent-map";
 
@@ -48,6 +51,7 @@ export interface AgentDecisionServiceResult {
   decision: AgentDecision;
   fallback: boolean;
   fallbackReason?: string;
+  rejection?: DecisionRejection;
   usage?: LlmUsage;
   request: LlmRequest;
 }
@@ -91,7 +95,11 @@ export class AgentDecisionService {
 
     const result = await this.providers.generateStructured(request, AgentDecisionSchema);
     if (!result.ok) {
-      return this.withFallback(input, request, availableActions, providerErrorReason(result.error));
+      const reason = providerErrorReason(result.error);
+      return this.withFallback(input, request, availableActions, reason, {
+        code: result.error.code,
+        message: reason,
+      });
     }
 
     const parsed = AgentDecisionSchema.safeParse(result.value);
@@ -99,12 +107,17 @@ export class AgentDecisionService {
       return this.withFallback(input, request, availableActions, "provider returned invalid AgentDecision");
     }
 
-    if (!isAllowedDecisionAction(parsed.data.action, availableActions)) {
+    const contract = validateAgentDecisionContract({
+      decision: parsed.data,
+      availableActions,
+    });
+    if (!contract.ok) {
       return this.withFallback(
         input,
         request,
         availableActions,
-        `provider chose unavailable action: ${parsed.data.action}`,
+        contract.rejection.message,
+        contract.rejection,
       );
     }
 
@@ -121,6 +134,7 @@ export class AgentDecisionService {
     request: LlmRequest,
     availableActions: AgentDecision["action"][],
     reason: string,
+    rejection?: DecisionRejection,
   ): AgentDecisionServiceResult {
     return {
       decision: fallbackDecision({
@@ -134,6 +148,7 @@ export class AgentDecisionService {
       }),
       fallback: true,
       fallbackReason: reason,
+      rejection,
       request,
     };
   }

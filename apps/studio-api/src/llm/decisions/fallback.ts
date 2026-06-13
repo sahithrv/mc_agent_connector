@@ -23,15 +23,27 @@ export function fallbackDecision(input: FallbackDecisionInput): AgentDecision {
   const reason = compactReason(input.reason);
 
   if (isThreatened(input) && availableActions.includes("flee")) {
+    const fleeParams = fleeParameters(input, reason);
+    if (!fleeParams) {
+      return helpOrContinueFallback(input, availableActions, reason);
+    }
     return parseFallback({
       intent: "retreat",
       action: "flee",
-      parameters: { distance: 16, fallback: true, reason },
+      parameters: fleeParams,
       confidence: 0.4,
       reasoningSummary: `Fallback flee: ${reason}`,
     });
   }
 
+  return helpOrContinueFallback(input, availableActions, reason);
+}
+
+function helpOrContinueFallback(
+  input: FallbackDecisionInput,
+  availableActions: AgentDecision["action"][],
+  reason: string,
+): AgentDecision {
   if (shouldAskForHelp(input) && availableActions.includes("chat_ai_private")) {
     const recipientIds = helpRecipients(input);
     if (recipientIds.length > 0) {
@@ -120,6 +132,39 @@ function hasThreat(values: unknown): boolean {
   });
 }
 
+function fleeParameters(input: FallbackDecisionInput, reason: string): Record<string, JsonValue> | undefined {
+  const threat = firstThreat(input.perception?.nearbyEntities) ?? firstThreat(input.perception?.nearbyPlayers);
+  if (!threat) {
+    return undefined;
+  }
+
+  const position = positionValue(threat.position);
+  const entityId = stringValue(threat.id);
+  const username = stringValue(threat.username) ?? stringValue(threat.name);
+  const target: Record<string, JsonValue> = {
+    distance: 16,
+    fallback: true,
+    reason,
+  };
+  if (entityId) target.entityId = entityId;
+  if (username) target.username = username;
+  if (position) target.position = position;
+  return entityId || username || position ? target : undefined;
+}
+
+function firstThreat(values: unknown): Record<string, JsonValue | undefined> | undefined {
+  if (!Array.isArray(values)) {
+    return undefined;
+  }
+  return values.find((value): value is Record<string, JsonValue | undefined> =>
+    typeof value === "object"
+    && value !== null
+    && !Array.isArray(value)
+    && ((value as Record<string, JsonValue | undefined>).hostile === true
+      || (value as Record<string, JsonValue | undefined>).threatening === true),
+  );
+}
+
 function helpRecipients(input: FallbackDecisionInput): string[] {
   const direct = (input.recentChat ?? [])
     .flatMap((message) => [message.senderId, ...message.recipientIds])
@@ -128,6 +173,33 @@ function helpRecipients(input: FallbackDecisionInput): string[] {
     .map((player) => typeof player.id === "string" ? player.id : undefined)
     .filter((id): id is string => Boolean(id && id !== input.agent.id));
   return [...new Set([...direct, ...players])].slice(0, 5);
+}
+
+function stringValue(value: unknown): string | undefined {
+  if (typeof value === "string" && value.trim().length > 0) {
+    return value;
+  }
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return String(value);
+  }
+  return undefined;
+}
+
+function positionValue(value: unknown): JsonValue | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  return typeof record.x === "number"
+    && typeof record.y === "number"
+    && typeof record.z === "number"
+    ? {
+        x: record.x,
+        y: record.y,
+        z: record.z,
+        ...(typeof record.world === "string" ? { world: record.world } : {}),
+      }
+    : undefined;
 }
 
 function compactReason(reason: string): string {

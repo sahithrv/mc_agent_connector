@@ -4,6 +4,14 @@ export type Visibility = "ai" | "human-team" | "recorder" | "public";
 
 export type EventSeverity = 1 | 2 | 3 | 4 | 5;
 
+export type RuntimeServiceStatus = "online" | "degraded" | "offline" | "unknown";
+
+export type BotConnectionStatus =
+  | "disconnected"
+  | "connecting"
+  | "connected"
+  | "failed";
+
 export type JsonValue =
   | null
   | boolean
@@ -20,6 +28,12 @@ export interface Position {
   world?: string;
 }
 
+export interface AgentBehaviorSettings {
+  riskTolerance?: "low" | "medium" | "high";
+  teamwork?: "solo" | "balanced" | "team-first";
+  initiative?: "low" | "medium" | "high";
+}
+
 export interface AgentConfig {
   id: string;
   name: string;
@@ -31,11 +45,65 @@ export interface AgentConfig {
   team?: string;
   subteam?: string;
   leader?: boolean;
+  enabled?: boolean;
+  personality?: string;
+  behavior?: AgentBehaviorSettings;
   mode?: AgentMode;
   routine?: string;
   allowedActions: string[];
   providerRef: string;
   visibility?: Visibility;
+}
+
+export interface RuntimeAgentSnapshot {
+  agentId: string;
+  mode: AgentMode;
+  connectionStatus: BotConnectionStatus;
+  hasBot: boolean;
+  currentTask?: string;
+  lastError?: string;
+  position?: Position;
+  updatedAt: string;
+}
+
+export interface RuntimeCapabilities {
+  launch: boolean;
+  stop: boolean;
+  restart: boolean;
+}
+
+export interface RuntimeServiceSnapshot {
+  status: RuntimeServiceStatus;
+  message?: string;
+  host?: string;
+  port?: number;
+  checkedAt?: string;
+}
+
+export interface RuntimeStatusSnapshot {
+  ok: boolean;
+  capabilities: RuntimeCapabilities;
+  minecraft: RuntimeServiceSnapshot;
+  agents: RuntimeAgentSnapshot[];
+}
+
+export interface RuntimeLaunchRequest {
+  agentIds: string[];
+  scenarioGoal?: string;
+  requestedBy?: string;
+}
+
+export interface RuntimeAgentControlResult {
+  agentId: string;
+  ok: boolean;
+  connectionStatus: BotConnectionStatus;
+  mode?: AgentMode;
+  error?: string;
+}
+
+export interface RuntimeLaunchResponse {
+  ok: boolean;
+  results: RuntimeAgentControlResult[];
 }
 
 export interface GameEvent {

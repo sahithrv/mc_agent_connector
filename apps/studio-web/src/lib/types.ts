@@ -3,8 +3,10 @@ import type {
   AgentConfig,
   AgentMode,
   AiChatMessage,
+  BotConnectionStatus,
   GameEvent,
   JsonValue,
+  Position,
 } from "@mc-ai-video/contracts";
 
 export const PENDING_SHARED_CONTRACT_TYPES = [
@@ -48,8 +50,11 @@ export interface UiSessionSummary {
 
 export interface UiAgentRuntime extends AgentConfig {
   mode: AgentMode;
+  connectionStatus?: BotConnectionStatus;
   currentTask?: string;
   health?: Record<string, JsonValue>;
+  lastError?: string;
+  position?: Position;
   updatedAt?: string;
 }
 
@@ -76,7 +81,8 @@ export interface PendingDirectorCommand {
     | "set-agent-task"
     | "set-subteam-task"
     | "god-dialogue"
-    | "add-agent";
+    | "add-agent"
+    | "update-agent";
   requestedBy?: string;
   targetAgentId?: string;
   reason?: string;

@@ -71,14 +71,7 @@ export class GuardRoutine implements Routine {
     return {
       status: "idle",
       reason: "area_clear",
-      action: canUseAction(agent, "idle")
-        ? {
-            action: "idle",
-            params: { reason: "area_clear" },
-            timeoutMs: 1_000,
-          }
-        : undefined,
-      taskEvents: [taskEvent(agent, this.id, "idle", "guard area clear", {})],
+      taskEvents: [taskEvent(agent, this.id, "idle", "guard area clear", { reason: "area_clear" })],
     };
   }
 

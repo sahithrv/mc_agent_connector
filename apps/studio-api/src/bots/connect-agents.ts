@@ -2,6 +2,7 @@ import { createBot } from "mineflayer";
 
 import { AgentRegistry } from "../agents/registry";
 import { loadAgentConfigs } from "../config/agents";
+import { loadLocalEnvFiles } from "../config/env";
 import { formatStartupError } from "../config/errors";
 import { createMineflayerBotFactory } from "./factory";
 import { BotLifecycleManager } from "./lifecycle";
@@ -19,6 +20,7 @@ interface LaunchOptions {
 
 export async function main(): Promise<void> {
   try {
+    loadLocalEnvFiles();
     const options = readLaunchOptions();
     const agents = await loadAgentConfigs();
     const registry = new AgentRegistry(agents);

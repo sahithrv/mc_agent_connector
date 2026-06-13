@@ -1,5 +1,11 @@
 import { useSyncExternalStore } from "react";
-import type { AgentConfig, AiChatMessage, GameEvent } from "@mc-ai-video/contracts";
+import type {
+  AgentConfig,
+  AiChatMessage,
+  GameEvent,
+  JsonValue,
+  RuntimeStatusSnapshot,
+} from "@mc-ai-video/contracts";
 
 import type { ApiErrorShape } from "../api/client";
 import type {
@@ -108,6 +114,54 @@ export class StudioStore {
     });
   }
 
+  setRuntimeStatus(runtime: RuntimeStatusSnapshot): void {
+    const runtimeByAgentId = new Map(
+      runtime.agents.map((agent) => [agent.agentId, agent]),
+    );
+    const agents = this.state.agents.map((agent) => {
+      const update = runtimeByAgentId.get(agent.id);
+      if (!update) return agent;
+
+      return {
+        ...agent,
+        mode: update.mode,
+        connectionStatus: update.connectionStatus,
+        currentTask: update.currentTask ?? agent.currentTask,
+        lastError: update.lastError,
+        position: update.position,
+        updatedAt: update.updatedAt,
+        health: compactRuntimeHealth({
+          ...agent.health,
+          connectionStatus: update.connectionStatus,
+          hasBot: update.hasBot,
+          lastError: update.lastError,
+          position: update.position,
+        }),
+      };
+    });
+    const connected = runtime.agents.filter(
+      (agent) => agent.connectionStatus === "connected" || agent.connectionStatus === "connecting",
+    ).length;
+
+    this.setState({
+      agents,
+      health: {
+        ...this.state.health,
+        minecraft: {
+          status: runtime.minecraft.status,
+          message: runtime.minecraft.message,
+        },
+        bots: {
+          connected,
+          total: Math.max(runtime.agents.length, agents.length),
+          message: runtime.capabilities.launch
+            ? "Runtime lifecycle controller attached"
+            : "Runtime lifecycle controller unavailable",
+        },
+      },
+    });
+  }
+
   setApiStatus(api: StudioState["api"]): void {
     this.setState({ api });
   }
@@ -201,4 +255,14 @@ function createUnknownAgent(update: PendingAgentStateUpdate): UiAgentRuntime {
 
 function limitNewest<T>(items: T[], max: number): T[] {
   return items.length > max ? items.slice(0, max) : items;
+}
+
+function compactRuntimeHealth(
+  source: Record<string, JsonValue | undefined>,
+): Record<string, JsonValue> {
+  return Object.fromEntries(
+    Object.entries(source).filter(
+      (entry): entry is [string, JsonValue] => entry[1] !== undefined,
+    ),
+  );
 }

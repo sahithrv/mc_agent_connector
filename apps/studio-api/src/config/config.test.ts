@@ -18,6 +18,7 @@ test("loadStudioConfig accepts a valid config", async () => {
   assert.equal(config.server.host, "127.0.0.1");
   assert.equal(config.server.port, 3100);
   assert.equal(config.llm.maxConcurrency, 2);
+  assert.equal(config.plugin?.sharedSecret, "dev-local-secret");
 });
 
 test("loadStudioConfig rejects bad config with a readable field error", async () => {
@@ -90,6 +91,9 @@ function validStudioConfig() {
     },
     llm: {
       maxConcurrency: 2,
+    },
+    plugin: {
+      sharedSecret: "dev-local-secret",
     },
   };
 }

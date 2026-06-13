@@ -148,8 +148,19 @@ export function dashboardWsUrl(): string {
     return explicit;
   }
 
-  const apiBase = import.meta.env.VITE_STUDIO_API_BASE_URL ?? "/api";
-  const path = `${apiBase.replace(/\/$/, "")}/ws/dashboard`;
+  const apiBase = import.meta.env.VITE_STUDIO_API_BASE_URL;
+  if (!apiBase && isLocalViteDevOrigin()) {
+    const url = new URL(window.location.href);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    url.port = "3100";
+    url.pathname = "/ws/dashboard";
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  }
+
+  const resolvedApiBase = apiBase ?? "/api";
+  const path = `${resolvedApiBase.replace(/\/$/, "")}/ws/dashboard`;
 
   if (/^https?:\/\//.test(path)) {
     return path.replace(/^http/, "ws");
@@ -157,6 +168,11 @@ export function dashboardWsUrl(): string {
 
   const origin = window.location.origin.replace(/^http/, "ws");
   return `${origin}${path.startsWith("/") ? path : `/${path}`}`;
+}
+
+function isLocalViteDevOrigin(): boolean {
+  return window.location.port === "5173"
+    && ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
 }
 
 function nowIso(): string {
