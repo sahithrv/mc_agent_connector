@@ -45,6 +45,56 @@ test("prompt context separates static persona, dynamic state, and respects budge
   assert.match(context.contextText, /DYNAMIC_STATE/);
 });
 
+test("prompt context renders recent action results compactly and preserves failure reasons", () => {
+  const context = buildPromptContext({
+    agent: {
+      id: "miner-1",
+      name: "Rook",
+      role: "miner",
+      team: "village",
+      routine: "miner",
+      allowedActions: ["idle", "move_to", "mine_block", "craft_item"],
+    },
+    staticPersona: { identity: "Rook is a practical miner." },
+    recentActionResults: [
+      {
+        action: "collect_item",
+        ok: true,
+        targetKey: "item:stick",
+        completedAt: "2026-06-12T00:00:00.000Z",
+      },
+      {
+        action: "mine_block",
+        ok: false,
+        params: { block: "iron_ore", position: { x: 12, y: 64, z: -9 } },
+        error: "missing valid tool for block: iron_ore",
+        requestedBy: "llm",
+        completedAt: "2026-06-12T00:00:01.000Z",
+      },
+      {
+        action: "craft_item",
+        ok: false,
+        params: { item: "wooden_pickaxe" },
+        error: "no craftable recipe for wooden_pickaxe",
+      },
+      {
+        action: "move_to",
+        ok: false,
+        params: { position: { x: 30, y: 64, z: 10 } },
+        error: "No path to goal",
+      },
+    ],
+    maxChars: 2_000,
+  });
+
+  assert.ok(context.contextText.length <= 2_000);
+  assert.match(context.contextText, /RECENT_ACTION_RESULTS/);
+  assert.match(context.contextText, /mine_block target=iron_ore@12,64,-9 ok=false/);
+  assert.match(context.contextText, /error="missing valid tool for block: iron_ore"/);
+  assert.match(context.contextText, /craft_item target=wooden_pickaxe ok=false error="no craftable recipe for wooden_pickaxe"/);
+  assert.match(context.contextText, /move_to target=30,64,10 ok=false error="No path to goal"/);
+});
+
 test("persona and task prompts keep contracts compact and high level", () => {
   const context = buildPromptContext({
     agent: {
@@ -81,6 +131,8 @@ test("persona and task prompts keep contracts compact and high level", () => {
   assert.match(decision, /ACTION_PARAMETER_RULES/);
   assert.match(decision, /move_to, mine_block, and place_block require/);
   assert.match(decision, /Use relationships and memories/);
+  assert.match(decision, /do not repeat the same failed action-target pair/);
+  assert.match(decision, /missing tool\/material/);
   assert.match(reflection, /only deltas/);
   assert.match(reflection, /Do not rewrite the full static persona/);
   assert.match(leader, /under 240 characters/);

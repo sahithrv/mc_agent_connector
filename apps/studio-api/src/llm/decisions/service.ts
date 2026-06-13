@@ -3,10 +3,12 @@ import type { AgentConfig, AiChatMessage, GameEvent } from "@mc-ai-video/contrac
 import type { LlmProviderRegistry } from "../providers";
 import type { LlmError, LlmRequest, LlmUsage } from "../providers/types";
 import {
+  ACTION_PARAMETER_RULES,
   buildDecisionPrompt,
   buildPersonaSystemPrompt,
   buildPromptContext,
   type ActiveScenarioContext,
+  type ActionResultContext,
   type DynamicAgentState,
   type MemoryContext,
   type PromptPerceptionSnapshot,
@@ -39,6 +41,7 @@ export interface AgentDecisionServiceInput {
   perception?: PromptPerceptionSnapshot;
   relationships?: RelationshipContext[];
   memories?: MemoryContext[];
+  recentActionResults?: ActionResultContext[];
   recentChat?: AiChatMessage[];
   recentEvents?: GameEvent[];
   activeScenario?: ActiveScenarioContext;
@@ -50,6 +53,7 @@ export interface AgentDecisionServiceInput {
 export interface AgentDecisionServiceResult {
   decision: AgentDecision;
   fallback: boolean;
+  repaired?: boolean;
   fallbackReason?: string;
   rejection?: DecisionRejection;
   usage?: LlmUsage;
@@ -70,6 +74,7 @@ export class AgentDecisionService {
       perception: input.perception,
       relationships: input.relationships,
       memories: input.memories,
+      recentActionResults: input.recentActionResults,
       recentChat: input.recentChat,
       recentEvents: input.recentEvents,
       activeScenario: input.activeScenario,
@@ -96,6 +101,17 @@ export class AgentDecisionService {
     const result = await this.providers.generateStructured(request, AgentDecisionSchema);
     if (!result.ok) {
       const reason = providerErrorReason(result.error);
+      if (result.error.code === "schema_validation_failed") {
+        const repaired = await this.repairDecision({
+          input,
+          request,
+          availableActions,
+          reason,
+        });
+        if (repaired) {
+          return repaired;
+        }
+      }
       return this.withFallback(input, request, availableActions, reason, {
         code: result.error.code,
         message: reason,
@@ -104,7 +120,18 @@ export class AgentDecisionService {
 
     const parsed = AgentDecisionSchema.safeParse(result.value);
     if (!parsed.success) {
-      return this.withFallback(input, request, availableActions, "provider returned invalid AgentDecision");
+      const reason = schemaErrorReason(parsed.error.issues);
+      const repaired = await this.repairDecision({
+        input,
+        request,
+        availableActions,
+        reason,
+        previousDecision: result.value,
+      });
+      if (repaired) {
+        return repaired;
+      }
+      return this.withFallback(input, request, availableActions, reason);
     }
 
     const contract = validateAgentDecisionContract({
@@ -112,6 +139,16 @@ export class AgentDecisionService {
       availableActions,
     });
     if (!contract.ok) {
+      const repaired = await this.repairDecision({
+        input,
+        request,
+        availableActions,
+        reason: contract.rejection.message,
+        previousDecision: parsed.data,
+      });
+      if (repaired) {
+        return repaired;
+      }
       return this.withFallback(
         input,
         request,
@@ -142,6 +179,7 @@ export class AgentDecisionService {
         reason,
         perception: input.perception,
         dynamicState: input.dynamicState,
+        recentActionResults: input.recentActionResults,
         recentChat: input.recentChat,
         recentEvents: input.recentEvents,
         availableActions,
@@ -152,8 +190,103 @@ export class AgentDecisionService {
       request,
     };
   }
+
+  private async repairDecision(input: {
+    input: AgentDecisionServiceInput;
+    request: LlmRequest;
+    availableActions: AgentDecision["action"][];
+    reason: string;
+    previousDecision?: unknown;
+  }): Promise<AgentDecisionServiceResult | undefined> {
+    const repairRequest: LlmRequest = {
+      ...input.request,
+      messages: [
+        ...input.request.messages,
+        {
+          role: "user",
+          content: buildDecisionRepairPrompt({
+            reason: input.reason,
+            previousDecision: input.previousDecision,
+            availableActions: input.availableActions,
+          }),
+        },
+      ],
+    };
+
+    const result = await this.providers.generateStructured(repairRequest, AgentDecisionSchema);
+    if (!result.ok) {
+      return undefined;
+    }
+
+    const parsed = AgentDecisionSchema.safeParse(result.value);
+    if (!parsed.success) {
+      return undefined;
+    }
+
+    const contract = validateAgentDecisionContract({
+      decision: parsed.data,
+      availableActions: input.availableActions,
+    });
+    if (!contract.ok) {
+      return undefined;
+    }
+
+    return {
+      decision: parsed.data,
+      fallback: false,
+      repaired: true,
+      usage: result.usage,
+      request: repairRequest,
+    };
+  }
 }
 
 function providerErrorReason(error: LlmError): string {
   return `${error.code}: ${error.message}`;
+}
+
+function buildDecisionRepairPrompt(input: {
+  reason: string;
+  previousDecision?: unknown;
+  availableActions: AgentDecision["action"][];
+}): string {
+  return [
+    `Your previous AgentDecision was rejected: ${input.reason}.`,
+    input.previousDecision !== undefined
+      ? [
+          "",
+          "PREVIOUS_REJECTED_DECISION",
+          safeJsonPreview(input.previousDecision),
+        ].join("\n")
+      : undefined,
+    "",
+    "Return a corrected AgentDecision using only the listed actions.",
+    "If no valid physical action can advance the goal, choose continue_routine or ask for help.",
+    "Do not choose idle unless there is truly no progress action.",
+    "",
+    "AVAILABLE_ACTIONS",
+    promptActionDescriptions(input.availableActions).join(", "),
+    "",
+    "ACTION_PARAMETER_RULES",
+    ACTION_PARAMETER_RULES.map((rule) => `- ${rule}`).join("\n"),
+    "",
+    "Return only AgentDecision JSON with fields: intent, action, parameters, optional speech, confidence, reasoningSummary.",
+  ].filter((line): line is string => line !== undefined).join("\n");
+}
+
+function schemaErrorReason(issues: Array<{ path: PropertyKey[]; message: string }>): string {
+  const summary = issues
+    .slice(0, 4)
+    .map((issue) => `${issue.path.join(".") || "root"} ${issue.message}`)
+    .join("; ");
+  return summary ? `provider returned invalid AgentDecision: ${summary}` : "provider returned invalid AgentDecision";
+}
+
+function safeJsonPreview(value: unknown): string {
+  try {
+    const text = JSON.stringify(value);
+    return text.length <= 1_500 ? text : `${text.slice(0, 1_497)}...`;
+  } catch {
+    return String(value);
+  }
 }

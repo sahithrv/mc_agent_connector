@@ -59,6 +59,8 @@ export interface RoutineActionIntent {
   params: Record<string, JsonValue>;
   timeoutMs?: number;
   requestedBy?: string;
+  source?: string;
+  targetKey?: string;
 }
 
 export interface RoutineTaskEvent {

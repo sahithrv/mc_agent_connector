@@ -13,6 +13,7 @@ export function actionSucceeded(
     startedAt,
     completedAt: new Date().toISOString(),
     data,
+    ...actionMetadata(request),
   };
 }
 
@@ -31,5 +32,15 @@ export function actionFailed(
     completedAt: new Date().toISOString(),
     error,
     data,
+    ...actionMetadata(request),
+  };
+}
+
+function actionMetadata(request: ActionRequest): Pick<ActionResult, "params" | "requestedBy" | "source" | "targetKey"> {
+  return {
+    params: request.params,
+    requestedBy: request.requestedBy,
+    source: request.source,
+    targetKey: request.targetKey,
   };
 }

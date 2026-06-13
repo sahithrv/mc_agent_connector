@@ -59,12 +59,15 @@ export function createFollowPlayerAction(): RegisteredAction {
     async run(context) {
       const username = targetUsername(context.request);
       const target = username ? findPlayer(context.bot, username) : undefined;
-      if (!username || !target) {
+      if (!username || !target?.position) {
         return actionFailed(context.request, context.startedAt, "target player not visible");
       }
 
       const range = numberParam(context.request.params, "range") ?? 3;
-      const result = await startGoal(context, new goals.GoalFollow(target as never, range));
+      const goal = hasVec3Position(target)
+        ? new goals.GoalFollow(target as never, range)
+        : new goals.GoalNear(target.position.x, target.position.y, target.position.z, range);
+      const result = await startGoal(context, goal);
       return result ?? actionSucceeded(context.request, context.startedAt, { followed: username });
     },
   };
@@ -142,6 +145,10 @@ function findPlayer(bot: BotHandle | undefined, username: string): BotEntity | u
   return Object.values(bot?.entities ?? {}).find((entity) =>
     entity.type === "player" && entity.username === username,
   );
+}
+
+function hasVec3Position(entity: BotEntity): boolean {
+  return typeof (entity.position as { floored?: unknown } | undefined)?.floored === "function";
 }
 
 function fleeOrigin(context: ActionRunContext): Position | undefined {

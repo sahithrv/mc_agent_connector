@@ -15,6 +15,7 @@ import type {
 import type { AgentRegistry } from "../agents/registry";
 import { DEFAULT_AGENT_ACTIONS, normalizeAgentActions } from "../agents/default-actions";
 import { createDefaultActionRegistry } from "../actions";
+import { actionFailed } from "../actions/result";
 import type { ActionPolicy, AiChatPublishInput } from "../actions/types";
 import type { ActionRegistry as RuntimeActionRegistry } from "../actions/registry";
 import { createPerceptionSnapshot } from "../bots/perception";
@@ -30,6 +31,7 @@ import {
 import { recipeKnowledgeMemories } from "../crafting/knowledge";
 import type { StudioEventBus } from "../events/bus";
 import { AgentDecisionService, type AgentDecisionServiceResult } from "../llm/decisions/service";
+import { canonicalMaterialName, isPlaceableMaterialName } from "../materials";
 import { allowedDecisionActionsForAgent } from "../llm/decisions/intent-map";
 import { createDefaultLlmProviderRegistry, type LlmProviderRegistry } from "../llm/providers";
 import type { AgentDecision } from "../llm/schemas/agent-decision";
@@ -48,6 +50,14 @@ import type {
   SchedulerEvent,
   WakeReason,
 } from "../scheduler/types";
+import { ActionHistoryStore } from "./action-history";
+import {
+  createDecisionTrace,
+  emitDecisionTrace,
+  targetKeyFromAction,
+  withDecisionTrace,
+  type DecisionSource,
+} from "./decision-trace";
 import { SubteamDirectory, jsonRecipientRequest } from "./subteams";
 import { TeamMemoryStore, teamMemoryPromptMemories } from "./team-memory";
 import { TeamGoalController } from "./team-goal-controller";
@@ -74,6 +84,7 @@ export interface LiveAgentRuntime {
   stop(): Promise<void>;
   scheduler: AgentScheduler;
   competitive: LiveCompetitiveRuntime;
+  actionHistory: ActionHistoryStore;
 }
 
 export interface LiveCompetitiveRuntime {
@@ -85,6 +96,7 @@ export function createLiveAgentRuntime(options: LiveAgentRuntimeOptions): LiveAg
   const subteams = new SubteamDirectory(options.agents);
   const context = new LiveContext(subteams, options.agents);
   const teamMemory = new TeamMemoryStore({ subteams });
+  const actionHistory = new ActionHistoryStore();
   const coordination = new RuntimeCoordinationMessages(options.eventBus, subteams);
   const llmProviders = createDefaultLlmProviderRegistry();
   const competitive = new CompetitiveLiveCoordinator({
@@ -122,6 +134,8 @@ export function createLiveAgentRuntime(options: LiveAgentRuntimeOptions): LiveAg
       llmProviders,
       competitive,
       coordination,
+      options.eventBus,
+      actionHistory,
     ),
     events: {
       publish(event) {
@@ -174,6 +188,7 @@ export function createLiveAgentRuntime(options: LiveAgentRuntimeOptions): LiveAg
       }
     }),
     options.eventBus.subscribe("action.result", (result) => {
+      actionHistory.record(result);
       teamGoals.recordActionResult(result);
       competitive.recordActionResult(result);
       if (!result.ok) {
@@ -267,6 +282,7 @@ export function createLiveAgentRuntime(options: LiveAgentRuntimeOptions): LiveAg
   return {
     scheduler,
     competitive,
+    actionHistory,
     start() {
       if (interval) return;
       interval = setInterval(() => {
@@ -712,7 +728,8 @@ class CompetitiveLiveCoordinator implements LiveCompetitiveRuntime {
     const totals = new Map<string, number>();
     for (const agentId of memberIds) {
       for (const item of this.options.registry.getBot(agentId)?.inventory?.items() ?? []) {
-        totals.set(item.name, (totals.get(item.name) ?? 0) + item.count);
+        const material = canonicalMaterialName(item.name);
+        totals.set(material, (totals.get(material) ?? 0) + item.count);
       }
     }
 
@@ -836,6 +853,8 @@ class LiveDecisionPlanner implements DecisionPlanner {
     providers: LlmProviderRegistry,
     private readonly competitive: CompetitiveLiveCoordinator,
     private readonly coordination: RuntimeCoordinationMessages,
+    private readonly eventBus: StudioEventBus,
+    private readonly actionHistory: ActionHistoryStore,
   ) {
     this.decisions = new AgentDecisionService(providers);
   }
@@ -871,19 +890,27 @@ class LiveDecisionPlanner implements DecisionPlanner {
         `${target} nearby; ${survivalIntent.action === "flee" ? "falling back" : "engaging"}.`,
       );
       console.log(`[live-plan] ${agent.id} ${survivalIntent.action}: deterministic survival/threat response`);
-      return {
+      return this.tracedPlan({
+        agent,
+        source: "survival",
         action: survivalIntent,
+        reason: "deterministic survival/threat response",
         note: "deterministic survival/threat response",
-      };
+        fallback: false,
+      });
     }
 
     const opportunisticIntent = this.opportunisticCollectIntent(agent, perception, bot);
     if (opportunisticIntent) {
       console.log(`[live-plan] ${agent.id} ${opportunisticIntent.action}: deterministic useful-drop collection`);
-      return {
+      return this.tracedPlan({
+        agent,
+        source: "opportunistic_collect",
         action: opportunisticIntent,
+        reason: "deterministic useful-drop collection",
         note: "deterministic useful-drop collection",
-      };
+        fallback: false,
+      });
     }
 
     const competitiveIntent = this.competitive.plan({
@@ -897,7 +924,14 @@ class LiveDecisionPlanner implements DecisionPlanner {
           ? `[live-plan] ${agent.id} ${competitiveIntent.action.action}: ${competitiveIntent.note ?? "competitive orchestration"}`
           : `[live-plan] ${agent.id} no action: ${competitiveIntent.note ?? "competitive orchestration"}`,
       );
-      return competitiveIntent;
+      return this.tracedPlan({
+        agent,
+        source: "competitive",
+        action: competitiveIntent.action,
+        reason: `deterministic ${competitiveIntent.note ?? "competitive orchestration"}`,
+        note: competitiveIntent.note,
+        fallback: false,
+      });
     }
     if (competitiveIntent.note) {
       fallbackNotes.push(competitiveIntent.note);
@@ -911,7 +945,14 @@ class LiveDecisionPlanner implements DecisionPlanner {
     });
     if (teamIntent.action) {
       console.log(`[live-plan] ${agent.id} ${teamIntent.action.action}: ${teamIntent.note ?? "team autonomy"}`);
-      return teamIntent;
+      return this.tracedPlan({
+        agent,
+        source: "team_goal",
+        action: teamIntent.action,
+        reason: `deterministic ${teamIntent.note ?? "team autonomy"}`,
+        note: teamIntent.note,
+        fallback: false,
+      });
     }
     if (teamIntent.note) {
       fallbackNotes.push(teamIntent.note);
@@ -973,6 +1014,7 @@ class LiveDecisionPlanner implements DecisionPlanner {
           version: bot?.version,
         }),
       ],
+      recentActionResults: this.actionHistory.recentForAgent(agent.id, 8),
       availableActions: availableLiveActions(agent, bot),
       constraints: [
         "Respond to director AI chat as a task assignment unless it is clearly casual.",
@@ -991,6 +1033,10 @@ class LiveDecisionPlanner implements DecisionPlanner {
         "For village-building tasks, use mine_block, collect_item, craft_item, move_to, and place_block when the needed target is visible or craftable.",
         "For attack tasks, use follow_player first if the target player is visible but not in range.",
         "Only attack a real player when the director goal explicitly says kill or attack that username.",
+        "Use RECENT_ACTION_RESULTS: do not repeat the same failed action-target pair unless the blocker has changed.",
+        "If a recent action failed due to missing tool/material, choose an action that satisfies that precondition.",
+        "Do not choose idle while any physical action or craftable precondition advances the active goal.",
+        "If a target is not visible/reachable, choose a search/move/scout action or ask for help, not the same failing action.",
       ],
       maxContextChars: 4_000,
     });
@@ -1008,9 +1054,43 @@ class LiveDecisionPlanner implements DecisionPlanner {
         + `${result.fallback ? ` fallback${fallbackReason}` : ""}: ${result.decision.reasoningSummary}`
         + `${usage ? ` ${usage}` : ""}`,
     );
-    return {
+    const llmSource: DecisionSource = result.fallback
+      ? result.rejection ? "llm_repair" : "fallback"
+      : "llm";
+    return this.tracedPlan({
+      agent,
+      source: llmSource,
       action: intent,
+      reason: result.fallbackReason ?? result.decision.reasoningSummary,
       note: [...fallbackNotes, result.decision.reasoningSummary].join(" | "),
+      fallback: result.fallback,
+      rejected: Boolean(result.rejection),
+    });
+  }
+
+  private tracedPlan(input: {
+    agent: AgentConfig;
+    source: DecisionSource;
+    action?: RoutineActionIntent;
+    reason?: string;
+    note?: string;
+    fallback?: boolean;
+    rejected?: boolean;
+  }): { action?: RoutineActionIntent; note?: string } {
+    const trace = createDecisionTrace({
+      agentId: input.agent.id,
+      source: input.source,
+      action: input.action?.action,
+      targetKey: targetKeyFromAction(input.action),
+      reason: input.reason,
+      note: input.note,
+      fallback: input.fallback,
+      rejected: input.rejected,
+    });
+    emitDecisionTrace(this.eventBus, trace);
+    return {
+      action: input.action ? withDecisionTrace(input.action, trace) : undefined,
+      note: input.note,
     };
   }
 
@@ -1479,16 +1559,7 @@ class LiveSchedulerActions implements SchedulerActionRegistry {
 
   private rejectPreflight(agent: AgentConfig, request: ActionRequest, reason: string): false {
     console.warn(`[live-action] ${agent.id}:${request.action} rejected: ${reason}`);
-    this.eventBus.emit("action.result", {
-      requestId: request.id,
-      agentId: agent.id,
-      action: request.action,
-      ok: false,
-      startedAt: request.createdAt,
-      completedAt: new Date().toISOString(),
-      error: reason,
-      data: { status: "rejected" },
-    });
+    this.eventBus.emit("action.result", actionFailed(request, request.createdAt, reason, { status: "rejected" }));
     return false;
   }
 }
@@ -2032,7 +2103,7 @@ function nearbyBuildPosition(bot: BotHandle | undefined): Position | undefined {
 
 function hasPlaceableInventory(bot: BotHandle | undefined): boolean {
   return Boolean(bot?.inventory?.items().some((item) =>
-    /dirt|cobblestone|stone|planks|log|wood|brick|sand|gravel|glass/i.test(item.name),
+    isPlaceableMaterialName(item.name),
   ));
 }
 
@@ -2060,8 +2131,38 @@ function logSchedulerEvent(event: SchedulerEvent): void {
     const action = typeof event.payload.action === "string" ? event.payload.action : "unknown";
     const ok = typeof event.payload.ok === "boolean" ? ` ok=${event.payload.ok}` : "";
     const reason = typeof event.payload.reason === "string" ? ` reason=${event.payload.reason}` : "";
-    console.log(`[live] ${event.type} ${event.agentId}:${action}${ok}${reason}`);
+    const requestedBy = typeof event.payload.requestedBy === "string" ? ` source=${event.payload.requestedBy}` : "";
+    const target = actionTargetSummary(event.payload.params);
+    console.log(`[live] ${event.type} ${event.agentId}:${action}${ok}${requestedBy}${reason}${target ? ` target=${target}` : ""}`);
   }
+}
+
+function actionTargetSummary(params: JsonValue | undefined): string | undefined {
+  if (!params || typeof params !== "object" || Array.isArray(params)) {
+    return undefined;
+  }
+  const record = params as Record<string, JsonValue>;
+  const position = positionSummary(record.position);
+  if (position) return position;
+  for (const key of ["username", "player", "target", "entityId", "item", "block"]) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim().length > 0) return value;
+  }
+  return undefined;
+}
+
+function positionSummary(value: JsonValue | undefined): string | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, JsonValue>;
+  return typeof record.x === "number" && typeof record.y === "number" && typeof record.z === "number"
+    ? `${roundNumber(record.x)},${roundNumber(record.y)},${roundNumber(record.z)}`
+    : undefined;
+}
+
+function roundNumber(value: number): string {
+  return Number.isInteger(value) ? String(value) : value.toFixed(1);
 }
 
 function emitSchedulerTraceEvent(eventBus: StudioEventBus, event: SchedulerEvent): void {

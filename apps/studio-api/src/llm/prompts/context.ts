@@ -3,6 +3,7 @@ import type { AiChatMessage, GameEvent, JsonValue, Position } from "@mc-ai-video
 import { joinBudgetedSections, type PromptSection } from "./budget";
 import type {
   ActiveScenarioContext,
+  ActionResultContext,
   DynamicAgentState,
   MemoryContext,
   PromptContext,
@@ -57,6 +58,10 @@ export function buildPromptContext(input: PromptContextInput): PromptContext {
     {
       title: "MEMORIES",
       body: renderMemories(input.memories),
+    },
+    {
+      title: "RECENT_ACTION_RESULTS",
+      body: renderRecentActionResults(input.recentActionResults),
     },
     {
       title: "RECENT_CHAT",
@@ -174,6 +179,23 @@ function renderMemories(memories: MemoryContext[] | undefined): string {
   ) ?? "";
 }
 
+function renderRecentActionResults(results: ActionResultContext[] | undefined): string {
+  return renderLines(
+    (results ?? []).slice(-8).map((result) => {
+      const fields = [
+        result.action,
+        `target=${actionResultTarget(result)}`,
+        `ok=${result.ok}`,
+        result.error ? `error=${JSON.stringify(result.error)}` : undefined,
+        result.requestedBy ? `requestedBy=${result.requestedBy}` : undefined,
+        result.completedAt ? `completedAt=${result.completedAt}` : undefined,
+        result.data ? `data=${compactData(result.data)}` : undefined,
+      ];
+      return fields.filter((field): field is string => Boolean(field)).join(" ");
+    }),
+  );
+}
+
 function renderRecentChat(messages: AiChatMessage[] | undefined): string {
   return renderList(
     "recentChat",
@@ -221,6 +243,69 @@ function compactValue(value: unknown): string {
 
 function renderList(label: string, values: string[]): string | undefined {
   return values.length ? `${label}=${values.join("; ")}` : undefined;
+}
+
+function renderLines(values: string[]): string {
+  return values.length ? values.map((value) => `- ${value}`).join("\n") : "";
+}
+
+function actionResultTarget(result: ActionResultContext): string {
+  const params = result.params ?? {};
+  const position = positionFromValue(params.position);
+  const primary = firstString([
+    params.block,
+    params.item,
+    params.name,
+    params.username,
+    params.player,
+    params.target,
+    params.entityId,
+  ]);
+  if (primary && position) return `${primary}@${renderPosition(position)}`;
+  if (primary) return primary;
+  if (position) return renderPosition(position);
+  if (result.targetKey) return readableTargetKey(result.targetKey);
+  return "unknown";
+}
+
+function readableTargetKey(targetKey: string): string {
+  const [prefix, ...rest] = targetKey.split(":");
+  const value = rest.join(":");
+  return value && prefix ? value : targetKey;
+}
+
+function firstString(values: Array<JsonValue | undefined>): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim().length > 0) {
+      return value.trim();
+    }
+  }
+  return undefined;
+}
+
+function positionFromValue(value: JsonValue | undefined): Position | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Partial<Position>;
+  return typeof record.x === "number" && typeof record.y === "number" && typeof record.z === "number"
+    ? { x: record.x, y: record.y, z: record.z, world: record.world }
+    : undefined;
+}
+
+function compactData(data: Record<string, JsonValue>): string {
+  const entries = Object.entries(data).slice(0, 4);
+  return entries.map(([key, value]) => `${key}=${compactDataValue(value)}`).join(",");
+}
+
+function compactDataValue(value: JsonValue): string {
+  if (typeof value === "string") {
+    return JSON.stringify(value.length > 80 ? `${value.slice(0, 77)}...` : value);
+  }
+  if (value === null || typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+  return Array.isArray(value) ? `[${value.length}]` : "{...}";
 }
 
 function renderPosition(position: Position): string {

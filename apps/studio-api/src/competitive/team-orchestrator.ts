@@ -1,6 +1,7 @@
 import type { AgentConfig, Position } from "@mc-ai-video/contracts";
 
 import type { BotHandle } from "../bots/types";
+import { canonicalMaterialName, isPlaceableMaterialName, materialNameMatches } from "../materials";
 import type { PerceptionSnapshot, RoutineActionIntent } from "../routines";
 import type { BlueprintType } from "./blueprints";
 import { AgentRole, AgentState, TacticalRole, TeamMemory } from "./team-memory";
@@ -302,7 +303,7 @@ function nearbyBuildPosition(bot: BotHandle | undefined): Position | undefined {
 function firstPlaceableItem(bot: BotHandle | undefined): string | undefined {
   return bot?.inventory?.items()
     .map((item) => item.name)
-    .find((name) => /dirt|cobblestone|stone|planks|log|wood|brick|sand|gravel|glass/i.test(name));
+    .find(isPlaceableMaterialName);
 }
 
 function canUse(agent: AgentConfig, action: string): boolean {
@@ -310,7 +311,9 @@ function canUse(agent: AgentConfig, action: string): boolean {
 }
 
 function isSafeResourceBlock(candidate: { type: string; safe?: boolean; belowAgent?: boolean }): boolean {
-  return candidate.safe !== false && candidate.belowAgent !== true && /log|wood|stone|dirt|sand|ore|gravel|clay/i.test(candidate.type);
+  return candidate.safe !== false
+    && candidate.belowAgent !== true
+    && ["wood", "stone", "dirt", "coal"].includes(canonicalMaterialName(candidate.type));
 }
 
 function isCollectibleMaterialDrop(
@@ -325,21 +328,9 @@ function isCollectibleMaterialDrop(
 }
 
 function isDroppedItem(type: string): boolean {
-  const normalized = type.trim().toLowerCase();
-  return normalized !== "item"
-    && normalized !== "object"
-    && normalized !== "dropped_item"
-    && /log|wood|planks|stone|cobblestone|dirt|sand|gravel|ore|ingot|coal|seed|wheat|carrot|potato|torch|ladder|fence|glass|brick/i.test(normalized);
-}
-
-function materialNameMatches(candidate: string, required: string): boolean {
-  const left = normalizeMaterialName(candidate);
-  const right = normalizeMaterialName(required);
-  return left.includes(right) || right.includes(left);
-}
-
-function normalizeMaterialName(value: string): string {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const material = canonicalMaterialName(type);
+  return !["item", "object", "dropped_item"].includes(type.trim().toLowerCase())
+    && /wood|stone|dirt|crop|coal|torch|ladder|fence|glass|brick|ingot/i.test(material);
 }
 
 function scoutOffset(agentId: string): { x: number; z: number } {

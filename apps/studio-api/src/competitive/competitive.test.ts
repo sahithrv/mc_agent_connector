@@ -18,6 +18,33 @@ test("BlueprintRegistry creates varied village plans per structure type", () => 
   assert.equal(plan.length, 5);
   assert.equal(new Set(plan.filter((item) => item.type === "residential").map((item) => item.id)).size, 3);
   assert.equal(new Set(plan.filter((item) => item.type === "farm").map((item) => item.id)).size, 2);
+  assert.ok(plan.every((blueprint) =>
+    Object.keys(blueprint.requiredMaterials).every((item) =>
+      !/^oak_|^spruce_|cobblestone|sandstone|stone_bricks/.test(item),
+    ),
+  ));
+});
+
+test("TeamMemory treats raw wood and stone variants as generic blueprint materials", () => {
+  const registry = BlueprintRegistry.withDefaults();
+  const blueprint = registry.get("residential:gothic-house");
+  assert.ok(blueprint);
+  const memory = new TeamMemory({
+    teamId: "red",
+    agentIds: ["builder-1", "gatherer-1"],
+    blueprints: [blueprint],
+    initialResources: {
+      cobblestone: 42,
+      spruce_planks: 30,
+      white_stained_glass: 8,
+      torch: 4,
+    },
+  });
+
+  assert.deepEqual([...memory.materialDeficits().keys()].sort(), []);
+  assert.equal(memory.snapshot().sharedResources.stone, 42);
+  assert.equal(memory.snapshot().sharedResources.wood, 30);
+  assert.equal(memory.snapshot().sharedResources.glass, 8);
 });
 
 test("TeamMemory tracks village state, rebalances roles, and transitions phases on major events", () => {
@@ -40,7 +67,7 @@ test("TeamMemory tracks village state, rebalances roles, and transitions phases 
   memory.on("resources.depleted", (event) => depleted.push(event.item));
 
   memory.updateSharedResource("cobblestone", -1);
-  assert.ok(depleted.includes("cobblestone"));
+  assert.ok(depleted.includes("stone"));
 
   for (const blueprint of blueprints) {
     memory.claimNextBlueprint("builder-1");

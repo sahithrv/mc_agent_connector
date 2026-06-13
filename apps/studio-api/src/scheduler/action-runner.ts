@@ -25,7 +25,7 @@ export class ActionSlotRunner {
         type: "scheduler.action.rejected",
         agentId: agent.id,
         severity: 3,
-        payload: { action: request.action },
+        payload: actionPayload(request),
       });
       return;
     }
@@ -37,7 +37,7 @@ export class ActionSlotRunner {
       type: "scheduler.action.started",
       agentId: agent.id,
       severity: 1,
-      payload: { action: request.action, requestId: request.id },
+      payload: actionPayload(request),
     });
 
     const promise = this.deps.actions
@@ -52,6 +52,10 @@ export class ActionSlotRunner {
           startedAt: request.createdAt,
           completedAt: new Date(this.deps.now()).toISOString(),
           error: error instanceof Error ? error.message : "action failed",
+          params: request.params,
+          requestedBy: request.requestedBy,
+          source: request.source,
+          targetKey: request.targetKey,
         });
       });
 
@@ -82,6 +86,10 @@ export class ActionSlotRunner {
     };
     if (result.error) payload.error = result.error;
     if (result.data) payload.data = result.data;
+    if (result.params) payload.params = result.params;
+    if (result.requestedBy) payload.requestedBy = result.requestedBy;
+    if (result.source) payload.source = result.source;
+    if (result.targetKey) payload.targetKey = result.targetKey;
     this.deps.emit({
       type: "scheduler.action.finished",
       agentId: agent.id,
@@ -100,10 +108,26 @@ export class ActionSlotRunner {
       action: intent.action,
       params: intent.params,
       requestedBy: intent.requestedBy ?? "scheduler",
+      source: intent.source,
+      targetKey: intent.targetKey,
       timeoutMs,
       createdAt: new Date(this.deps.now()).toISOString(),
     };
   }
+}
+
+function actionPayload(request: ActionRequest): Record<string, JsonValue> {
+  const payload: Record<string, JsonValue> = {
+    action: request.action,
+    requestId: request.id,
+    params: request.params,
+  };
+  if (request.requestedBy) payload.requestedBy = request.requestedBy;
+  if (request.source) payload.source = request.source;
+  if (request.targetKey) payload.targetKey = request.targetKey;
+  const reason = request.params.reason;
+  if (typeof reason === "string" && reason.trim().length > 0) payload.reason = reason;
+  return payload;
 }
 
 function minimumTimeoutForIntent(intent: RoutineActionIntent): number {

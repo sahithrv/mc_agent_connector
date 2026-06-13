@@ -1,6 +1,7 @@
 import { Vec3 } from "vec3";
 
 import type { BotBlock, BotHandle } from "../bots/types";
+import { isPlaceableMaterialName } from "../materials";
 import { positionParam, stringParam } from "./params";
 import { actionFailed, actionSucceeded } from "./result";
 import type { ActionRunContext, RegisteredAction } from "./types";
@@ -30,7 +31,7 @@ export function createPlaceBlockAction(): RegisteredAction {
       }
       const current = bot.entity?.position;
       const target = positionParam(context.request.params) ?? (current
-        ? { x: Math.floor(current.x) + 1, y: Math.floor(current.y), z: Math.floor(current.z) }
+        ? { x: Math.floor(current.x) + 1, y: Math.floor(current.y), z: Math.floor(current.z), world: current.world }
         : undefined);
       if (!target) {
         return actionFailed(context.request, context.startedAt, "target position required");
@@ -83,11 +84,11 @@ function findReferenceBlock(context: ActionRunContext, target: { x: number; y: n
   ];
 
   for (const candidate of candidates) {
-    const position = {
-      x: target.x + candidate.offset.x,
-      y: target.y + candidate.offset.y,
-      z: target.z + candidate.offset.z,
-    };
+    const position = new Vec3(
+      target.x + candidate.offset.x,
+      target.y + candidate.offset.y,
+      target.z + candidate.offset.z,
+    );
     const block = context.bot?.blockAt?.(position);
     if (block && block.name !== "air") {
       return { block, face: candidate.face };
@@ -105,7 +106,7 @@ function firstSafeBlockItem(bot: BotHandle): string | undefined {
     .map((item) => item.name)
     .find((name) =>
       !BLOCKED_PLACE_NAMES.has(name) &&
-      /dirt|cobblestone|stone|planks|log|wood|brick|sand|gravel|glass/i.test(name),
+      isPlaceableMaterialName(name),
     );
 }
 

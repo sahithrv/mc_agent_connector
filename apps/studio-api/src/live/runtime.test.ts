@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { ActionResult, AgentConfig, AiChatMessage, Position } from "@mc-ai-video/contracts";
+import type { ActionResult, AgentConfig, AiChatMessage, GameEvent, Position } from "@mc-ai-video/contracts";
 
 import { AgentRegistry } from "../agents/registry";
 import { fakeBot } from "../actions/test-helpers";
@@ -159,7 +159,11 @@ test("live runtime routes competitive village goals through competitive orchestr
 
   const eventBus = new StudioEventBus();
   const results: ActionResult[] = [];
+  const traces: GameEvent[] = [];
   eventBus.subscribe("action.result", (result) => results.push(result));
+  eventBus.subscribe("game.event", (event) => {
+    if (event.type === "decision.trace") traces.push(event);
+  });
 
   const live = createLiveAgentRuntime({
     agents,
@@ -186,6 +190,12 @@ test("live runtime routes competitive village goals through competitive orchestr
   await live.scheduler.waitForIdle();
 
   assert.ok(results.some((result) => result.ok && result.action === "place_block"));
+  const competitiveTrace = traces.find((event) =>
+    event.payload.source === "competitive" && event.payload.action === "place_block",
+  );
+  assert.equal(competitiveTrace?.visibility, "ai");
+  assert.equal(competitiveTrace?.payload.fallback, false);
+  assert.match(String(competitiveTrace?.payload.reason ?? ""), /competitive/);
   const snapshot = live.competitive.snapshot("red");
   assert.equal(snapshot?.phase, AgentState.BUILD_PHASE);
   assert.ok(snapshot.blueprintState.some((blueprint) => blueprint.status === "in_progress"));
@@ -334,6 +344,49 @@ test("live runtime falls back when competitive orchestration has no deterministi
     CompetitiveTeamOrchestrator.prototype.planNextAction = originalPlanNextAction;
     await live?.stop();
   }
+});
+
+test("live runtime records action result history from the action.result subscription", async () => {
+  const agents = [agent("miner-1", "MinerOne", true)];
+  const registry = new AgentRegistry(agents);
+  const eventBus = new StudioEventBus();
+  const live = createLiveAgentRuntime({
+    agents,
+    registry,
+    eventBus,
+    tickMs: 1_000,
+    maxConcurrentActions: 1,
+    maxPlanningSlots: 1,
+    planningCooldownMs: 0,
+  });
+
+  eventBus.emit("action.result", {
+    requestId: "mine-iron-failed",
+    agentId: "miner-1",
+    action: "mine_block",
+    params: {
+      block: "iron_ore",
+      position: { x: 8, y: 63, z: -2 },
+      reason: "gathering iron for tools",
+    },
+    ok: false,
+    startedAt: new Date(0).toISOString(),
+    completedAt: new Date(1).toISOString(),
+    error: "missing valid tool for block: iron_ore",
+    data: { status: "failed_precondition" },
+    requestedBy: "llm",
+    source: "llm",
+  });
+
+  const history = live.actionHistory.recentForAgent("miner-1");
+  assert.equal(history.length, 1);
+  assert.equal(history[0]?.error, "missing valid tool for block: iron_ore");
+  assert.equal(history[0]?.params.block, "iron_ore");
+  assert.equal(history[0]?.targetKey, "block:iron_ore");
+  assert.equal(history[0]?.requestedBy, "llm");
+  assert.equal(history[0]?.source, "llm");
+
+  await live.stop();
 });
 
 test("live runtime ignores casual player chat instead of waking all 20 agents", async () => {

@@ -1,6 +1,7 @@
 import type { ActionResult, AgentConfig, Position } from "@mc-ai-video/contracts";
 
 import type { BotHandle } from "../bots/types";
+import { isPlaceableMaterialName } from "../materials";
 import type { PerceptionSnapshot, RoutineActionIntent } from "../routines";
 import type { SubteamDirectory, SubteamView } from "./subteams";
 import type { TeamMemoryRecentView, TeamMemoryStore } from "./team-memory";
@@ -92,7 +93,6 @@ const AUTONOMY_GOAL_PATTERN =
 const ATTACK_GOAL_PATTERN = /\b(kill|attack|hunt|eliminate)\b/i;
 const MINEABLE_BLOCK_PATTERN = /stone|deepslate|dirt|gravel|coal_ore|iron_ore|copper_ore|log|wood/i;
 const RESOURCE_ITEM_PATTERN = /cobblestone|dirt|seed|log|planks|stone|ore|ingot|coal|wheat|carrot|potato|wood/i;
-const PLACEABLE_ITEM_PATTERN = /dirt|cobblestone|stone|planks|log|wood|brick|sand|gravel|glass/i;
 const WOOD_ITEM_PATTERN = /log|wood|planks/i;
 const MAX_RESOURCE_ITEM_DISTANCE = 12;
 
@@ -797,7 +797,7 @@ function hasPlaceableInventory(bot: BotHandle | undefined): boolean {
 function firstPlaceableItem(bot: BotHandle | undefined): string | undefined {
   return bot?.inventory?.items()
     .map((item) => item.name)
-    .find((name) => PLACEABLE_ITEM_PATTERN.test(name));
+    .find(isPlaceableMaterialName);
 }
 
 function inventoryNames(bot: BotHandle): string[] {

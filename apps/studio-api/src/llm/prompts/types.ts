@@ -46,6 +46,17 @@ export interface MemoryContext {
   relatedAgentIds?: string[];
 }
 
+export interface ActionResultContext {
+  action: string;
+  ok: boolean;
+  error?: string;
+  params?: Record<string, JsonValue>;
+  data?: Record<string, JsonValue>;
+  requestedBy?: string;
+  targetKey?: string;
+  completedAt?: string;
+}
+
 export interface ActiveScenarioContext {
   scenario: ScenarioConfig;
   currentEpisodeGoal?: string;
@@ -68,6 +79,7 @@ export interface PromptContextInput {
   perception?: PromptPerceptionSnapshot;
   relationships?: RelationshipContext[];
   memories?: MemoryContext[];
+  recentActionResults?: ActionResultContext[];
   recentChat?: AiChatMessage[];
   recentEvents?: GameEvent[];
   activeScenario?: ActiveScenarioContext;

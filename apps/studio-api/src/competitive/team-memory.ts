@@ -2,6 +2,7 @@ import { EventEmitter } from "node:events";
 
 import type { Position } from "@mc-ai-video/contracts";
 
+import { canonicalMaterialName } from "../materials";
 import type { Blueprint, BlueprintType } from "./blueprints";
 
 export enum AgentRole {
@@ -129,7 +130,7 @@ export class TeamMemory extends EventEmitter {
     }
 
     for (const [item, count] of Object.entries(options.initialResources ?? {})) {
-      this.armoryLedger.sharedResources.set(item, Math.max(0, Math.floor(count)));
+      this.addSharedResource(item, count);
     }
 
     for (const agentId of this.agentIds) {
@@ -258,26 +259,28 @@ export class TeamMemory extends EventEmitter {
   }
 
   updateSharedResource(item: string, delta: number): void {
-    const previous = this.armoryLedger.sharedResources.get(item) ?? 0;
+    const material = canonicalMaterialName(item);
+    const previous = this.armoryLedger.sharedResources.get(material) ?? 0;
     const next = Math.max(0, previous + delta);
-    this.armoryLedger.sharedResources.set(item, next);
+    this.armoryLedger.sharedResources.set(material, next);
     if (previous !== next) {
-      this.emit("resources.changed", { item, previous, next });
-      this.emitDepletionChange(item, next);
+      this.emit("resources.changed", { item: material, previous, next });
+      this.emitDepletionChange(material, next);
     }
 
-    this.rebalanceRoles(`resource ${item} changed`);
+    this.rebalanceRoles(`resource ${material} changed`);
   }
 
   setSharedResource(item: string, count: number): void {
-    const previous = this.armoryLedger.sharedResources.get(item) ?? 0;
+    const material = canonicalMaterialName(item);
+    const previous = this.armoryLedger.sharedResources.get(material) ?? 0;
     const next = Math.max(0, Math.floor(count));
-    this.armoryLedger.sharedResources.set(item, next);
+    this.armoryLedger.sharedResources.set(material, next);
     if (previous !== next) {
-      this.emit("resources.changed", { item, previous, next });
-      this.emitDepletionChange(item, next);
+      this.emit("resources.changed", { item: material, previous, next });
+      this.emitDepletionChange(material, next);
     }
-    this.rebalanceRoles(`resource ${item} set`);
+    this.rebalanceRoles(`resource ${material} set`);
   }
 
   assignGear(agentId: string, items: string[]): void {
@@ -349,7 +352,8 @@ export class TeamMemory extends EventEmitter {
       const blueprint = this.blueprints.get(state.blueprintId);
       if (!blueprint) continue;
       for (const [item, count] of Object.entries(blueprint.requiredMaterials)) {
-        required.set(item, (required.get(item) ?? 0) + count);
+        const material = canonicalMaterialName(item);
+        required.set(material, (required.get(material) ?? 0) + count);
       }
     }
 
@@ -401,16 +405,25 @@ export class TeamMemory extends EventEmitter {
   }
 
   private emitDepletionChange(item: string, available: number): void {
-    const required = this.materialDeficits().get(item) ?? 0;
+    const material = canonicalMaterialName(item);
+    const required = this.materialDeficits().get(material) ?? 0;
     if (required > 0 && available < required) {
-      if (!this.depletedResources.has(item)) {
-        this.depletedResources.add(item);
-        this.emit("resources.depleted", { item, available, required });
+      if (!this.depletedResources.has(material)) {
+        this.depletedResources.add(material);
+        this.emit("resources.depleted", { item: material, available, required });
       }
       return;
     }
 
-    this.depletedResources.delete(item);
+    this.depletedResources.delete(material);
+  }
+
+  private addSharedResource(item: string, count: number): void {
+    const material = canonicalMaterialName(item);
+    this.armoryLedger.sharedResources.set(
+      material,
+      (this.armoryLedger.sharedResources.get(material) ?? 0) + Math.max(0, Math.floor(count)),
+    );
   }
 
   private villageComplete(): boolean {

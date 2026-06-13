@@ -135,6 +135,8 @@ export interface ActionRequest {
   action: string;
   params: Record<string, JsonValue>;
   requestedBy?: string;
+  source?: string;
+  targetKey?: string;
   timeoutMs?: number;
   createdAt: string;
 }
@@ -148,6 +150,10 @@ export interface ActionResult {
   completedAt: string;
   error?: string;
   data?: Record<string, JsonValue>;
+  params?: Record<string, JsonValue>;
+  requestedBy?: string;
+  source?: string;
+  targetKey?: string;
 }
 
 export const PLUGIN_BRIDGE_SCHEMA_VERSION = "v1";
